@@ -63,6 +63,36 @@ fn load_config() -> Result<Config> {
     toml::from_str::<Config>(&raw).with_context(|| format!("failed to parse `{CONFIG_FILENAME}`"))
 }
 
+/// Fetch and import the runc signing key if not present.
+fn ensure_gpg_key(key_id: &str) -> Result<()> {
+    // Check if key already exists
+    let output = ProcCommand::new("gpg")
+        .args(["--list-keys", key_id])
+        .output()
+        .context("failed to execute `gpg`")?;
+
+    if output.status.success() {
+        return Ok(()); // Key already imported
+    }
+
+    println!("→ Importing GPG key {key_id}…");
+
+    let status = ProcCommand::new("gpg")
+        .args(["--keyserver", "keyserver.ubuntu.com", "--recv-keys", key_id])
+        .status()
+        .context("failed to import GPG key")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "failed to import GPG key {key_id}.\n\
+             Try manually: gpg --keyserver keyserver.ubuntu.com --recv-keys {key_id}"
+        );
+    }
+
+    println!("✓ GPG key imported");
+    Ok(())
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 /// Pull and register a container image on the host.
@@ -139,6 +169,8 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| RUNC_INSTALL_PATH.to_string());
 
     println!("→ Using runc version: {version}");
+
+    ensure_gpg_key("C2428CD75720FACDCF76B6EA17DE5ECB75A1100E")?;
 
     let bin_url = format!("{RUNC_URL_BASE}/{version}/runc.amd64");
     let sig_url = format!("{RUNC_URL_BASE}/{version}/runc.amd64.asc");
