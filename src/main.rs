@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
-use std::{fs, path::Path, path::PathBuf, process::Command as ProcCommand};
+use std::{
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::Command as ProcCommand,
+};
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -12,6 +17,10 @@ use std::{fs, path::Path, path::PathBuf, process::Command as ProcCommand};
     about = "Container Installation - Swiss Army Knife"
 )]
 struct Cli {
+    /// Skip all y/N confirmations (assume yes)
+    #[arg(short = 'y', long = "assume-yes", global = true)]
+    assume_yes: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -63,24 +72,95 @@ fn load_config() -> Result<Config> {
     toml::from_str::<Config>(&raw).with_context(|| format!("failed to parse `{CONFIG_FILENAME}`"))
 }
 
-/// Fetch and import the runc signing key if not present.
-fn ensure_gpg_key(key_id: &str) -> Result<()> {
-    // Check if key already exists
-    let output = ProcCommand::new("gpg")
-        .args(["--list-keys", key_id])
-        .output()
-        .context("failed to execute `gpg`")?;
+// ── Command confirmation ──────────────────────────────────────────────────────
+
+/// Render a `Command` as a human-readable shell-like string.
+fn fmt_cmd(cmd: &ProcCommand) -> String {
+    let prog = cmd.get_program().to_string_lossy().into_owned();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| {
+            let s = a.to_string_lossy();
+            // Wrap args that contain whitespace in quotes so the display is unambiguous.
+            if s.contains(char::is_whitespace) {
+                format!("\"{}\"", s)
+            } else {
+                s.into_owned()
+            }
+        })
+        .collect();
+
+    if args.is_empty() {
+        prog
+    } else {
+        format!("{} {}", prog, args.join(" "))
+    }
+}
+
+/// Print the exact command that is about to run, then ask the user to confirm.
+///
+/// * If `assume_yes` is `true` the interactive prompt is skipped and the
+///   function returns `Ok(())` immediately.
+/// * If the user types anything other than `y` / `yes` (case-insensitive)
+///   the function returns `Err` and the caller should propagate it.
+fn prompt(cmd: &ProcCommand, assume_yes: bool) -> Result<()> {
+    println!("  $ {}", fmt_cmd(cmd));
+
+    if assume_yes {
+        println!("  (--assume-yes: auto-confirmed)");
+        return Ok(());
+    }
+
+    print!("  Run this command? [y/N] ");
+    io::stdout().flush().context("failed to flush stdout")?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed to read user input")?;
+
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Ok(()),
+        _ => anyhow::bail!("aborted by user"),
+    }
+}
+
+/// Prompt, then spawn the command and return its `ExitStatus`.
+fn run_status(cmd: &mut ProcCommand, assume_yes: bool) -> Result<std::process::ExitStatus> {
+    prompt(cmd, assume_yes)?;
+    cmd.status().context("failed to spawn process")
+}
+
+/// Prompt, then spawn the command and capture its output.
+fn run_output(cmd: &mut ProcCommand, assume_yes: bool) -> Result<std::process::Output> {
+    prompt(cmd, assume_yes)?;
+    cmd.output().context("failed to spawn process")
+}
+
+// ── GPG helper ───────────────────────────────────────────────────────────────
+
+/// Import the runc signing key into the local keyring if it is not already present.
+fn ensure_gpg_key(key_id: &str, assume_yes: bool) -> Result<()> {
+    println!("→ Checking for GPG key {key_id}…");
+
+    let mut check = ProcCommand::new("gpg");
+    check.args(["--list-keys", key_id]);
+
+    let output =
+        run_output(&mut check, assume_yes).context("failed to execute `gpg --list-keys`")?;
 
     if output.status.success() {
-        return Ok(()); // Key already imported
+        println!("✓ GPG key already present");
+        return Ok(());
     }
 
     println!("→ Importing GPG key {key_id}…");
 
-    let status = ProcCommand::new("gpg")
-        .args(["--keyserver", "keyserver.ubuntu.com", "--recv-keys", key_id])
-        .status()
-        .context("failed to import GPG key")?;
+    let mut import = ProcCommand::new("gpg");
+    import.args(["--keyserver", "keyserver.ubuntu.com", "--recv-keys", key_id]);
+
+    let status =
+        run_status(&mut import, assume_yes).context("failed to execute `gpg --recv-keys`")?;
 
     if !status.success() {
         anyhow::bail!(
@@ -93,10 +173,10 @@ fn ensure_gpg_key(key_id: &str) -> Result<()> {
     Ok(())
 }
 
-// ── Commands ─────────────────────────────────────────────────────────────────
+// ── Commands ──────────────────────────────────────────────────────────────────
 
 /// Pull and register a container image on the host.
-fn install(image: &str, tag: Option<&str>) -> Result<()> {
+fn install(image: &str, tag: Option<&str>, assume_yes: bool) -> Result<()> {
     let target = match tag {
         Some(t) => format!("{image}:{t}"),
         None => image.to_owned(),
@@ -104,16 +184,23 @@ fn install(image: &str, tag: Option<&str>) -> Result<()> {
 
     println!("→ Installing: {target}");
 
-    ProcCommand::new("docker")
-        .args(["pull", &target])
-        .status()
-        .with_context(|| format!("failed to pull image `{target}`"))?;
+    let mut cmd = ProcCommand::new("docker");
+    cmd.args(["pull", &target]);
+
+    let status = run_status(&mut cmd, assume_yes)
+        .with_context(|| format!("failed to execute `docker pull` for `{target}`"))?;
+
+    if !status.success() {
+        anyhow::bail!("`docker pull {target}` exited with {status}");
+    }
 
     println!("✓ {target} installed.");
     Ok(())
 }
 
 /// Write a `config.toml` scaffold to the current working directory.
+///
+/// No external programs are invoked here, so no confirmation is needed.
 fn generate() -> Result<()> {
     let path = Path::new(CONFIG_FILENAME);
 
@@ -159,7 +246,7 @@ cpu_shares      = 1024
 }
 
 /// Download runc + signature, verify, and install.
-fn run() -> Result<()> {
+fn run(assume_yes: bool) -> Result<()> {
     let cfg = load_config()?;
     let version = &cfg.runtime.version;
     let install_path = cfg
@@ -170,7 +257,7 @@ fn run() -> Result<()> {
 
     println!("→ Using runc version: {version}");
 
-    ensure_gpg_key("C2428CD75720FACDCF76B6EA17DE5ECB75A1100E")?;
+    ensure_gpg_key("C2428CD75720FACDCF76B6EA17DE5ECB75A1100E", assume_yes)?;
 
     let bin_url = format!("{RUNC_URL_BASE}/{version}/runc.amd64");
     let sig_url = format!("{RUNC_URL_BASE}/{version}/runc.amd64.asc");
@@ -179,53 +266,53 @@ fn run() -> Result<()> {
     let bin_path = tmp.path().join("runc.amd64");
     let sig_path = tmp.path().join("runc.amd64.asc");
 
-    download(&bin_url, &bin_path)?;
-    download(&sig_url, &sig_path)?;
+    download(&bin_url, &bin_path, assume_yes)?;
+    download(&sig_url, &sig_path, assume_yes)?;
 
-    verify_signature(&bin_path, &sig_path)?;
+    verify_signature(&bin_path, &sig_path, assume_yes)?;
 
-    install_binary(&bin_path, Path::new(&install_path))?;
+    install_binary(&bin_path, Path::new(&install_path), assume_yes)?;
 
     println!("✓ runc {version} installed to {install_path}");
     Ok(())
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Download a URL to a local path using `curl`.
-fn download(url: &str, dest: &Path) -> Result<()> {
+fn download(url: &str, dest: &Path, assume_yes: bool) -> Result<()> {
     println!("→ Downloading {url}");
 
-    let status = ProcCommand::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--output",
-        ])
-        .arg(dest)
-        .arg(url)
-        .status()
+    let mut cmd = ProcCommand::new("curl");
+    cmd.args([
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--output",
+    ])
+    .arg(dest)
+    .arg(url);
+
+    let status = run_status(&mut cmd, assume_yes)
         .with_context(|| format!("failed to execute `curl` for {url}"))?;
 
     if !status.success() {
-        anyhow::bail!("curl failed to download {url} (exit {status})");
+        anyhow::bail!("`curl` failed to download {url} (exit {status})");
     }
 
     Ok(())
 }
 
 /// Verify a detached GPG signature.
-fn verify_signature(bin: &Path, sig: &Path) -> Result<()> {
+fn verify_signature(bin: &Path, sig: &Path, assume_yes: bool) -> Result<()> {
     println!("→ Verifying signature…");
 
-    let output = ProcCommand::new("gpg")
-        .arg("--verify")
-        .arg(sig)
-        .arg(bin)
-        .output()
-        .context("failed to execute `gpg` (is it installed?)")?;
+    let mut cmd = ProcCommand::new("gpg");
+    cmd.arg("--verify").arg(sig).arg(bin);
+
+    let output = run_output(&mut cmd, assume_yes)
+        .context("failed to execute `gpg --verify` (is gpg installed?)")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -242,7 +329,10 @@ fn verify_signature(bin: &Path, sig: &Path) -> Result<()> {
 }
 
 /// Copy the verified binary into place and make it executable.
-fn install_binary(src: &Path, dest: &Path) -> Result<()> {
+///
+/// Tries a direct `fs::copy` first; if that fails (e.g. the destination is
+/// owned by root) it falls back to `sudo install`.
+fn install_binary(src: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
     if let Some(parent) = dest.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)
@@ -250,17 +340,16 @@ fn install_binary(src: &Path, dest: &Path) -> Result<()> {
         }
     }
 
-    // Try a straight copy first; fall back to `sudo install` if that fails
-    // (e.g. because the destination lives in /usr/local/sbin).
     if fs::copy(src, dest).is_err() {
-        let status = ProcCommand::new("sudo")
-            .args(["install", "-m", "0755"])
-            .arg(src)
-            .arg(dest)
-            .status()
+        // Destination is likely in a root-owned directory; escalate with sudo.
+        let mut cmd = ProcCommand::new("sudo");
+        cmd.args(["install", "-m", "0755"]).arg(src).arg(dest);
+
+        let status = run_status(&mut cmd, assume_yes)
             .with_context(|| format!("failed to install binary to `{}`", dest.display()))?;
+
         if !status.success() {
-            anyhow::bail!("sudo install failed (exit {status})");
+            anyhow::bail!("`sudo install` failed (exit {status})");
         }
     } else {
         chmod_executable(dest)?;
@@ -284,19 +373,20 @@ fn chmod_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-// Silence warnings for unused `PathBuf` re-exports on some targets.
+// Silence dead-code warnings for the PathBuf import on some targets.
 #[allow(dead_code)]
 fn _unused(_: PathBuf) {}
 
-// ── Entry point ──────────────────────────────────────────────────────────────
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let assume_yes = cli.assume_yes;
 
     match cli.command {
-        Command::Install { image, tag } => install(&image, tag.as_deref())?,
+        Command::Install { image, tag } => install(&image, tag.as_deref(), assume_yes)?,
         Command::Generate => generate()?,
-        Command::Run => run()?,
+        Command::Run => run(assume_yes)?,
     }
 
     Ok(())
