@@ -1,0 +1,15 @@
+[package]
+name    = "cisak"
+version = "0.1.0"
+edition = "2021"
+description = "Container Installation - Swiss Army Knife"
+
+[[bin]]
+name = "cisak"
+path = "src/main.rs"
+
+[dependencies]
+clap    = { version = "4",   features = ["derive"] }
+serde   = { version = "1",   features = ["derive"] }
+toml    = "0.8"
+anyhow  = "1"
