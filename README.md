@@ -20,7 +20,6 @@ Every binary is cryptographically verified before it is written to disk (GPG for
   - [Global flags](#global-flags)
   - [`generate` — scaffold a config file](#generate)
   - [`run` — install the runtime stack](#run)
-  - [`install` — pull a container image](#install)
 - [Configuration reference](#configuration-reference)
 - [What `run` does, step by step](#what-run-does-step-by-step)
 - [Directory layout after installation](#directory-layout-after-installation)
@@ -40,7 +39,6 @@ The following tools must be available on `PATH`:
 | `sha256sum` | Verify the containerd archive |
 | `tar` | Extract tarballs |
 | `sudo` | Write to system directories (escalated automatically when needed) |
-| `docker` *(optional)* | Required only for the `install` sub-command |
 
 On a Debian/Ubuntu host all of these (except Docker) are present by default.
 
@@ -74,7 +72,6 @@ Options:
 Commands:
   generate   Generate a config.toml file in the current directory
   run        Download, verify, and install runc + CNI plugins + containerd
-  install    Install a container image
 ```
 
 ### Global flags
@@ -110,20 +107,6 @@ Reads `config.toml` from the current directory and installs:
 3. **containerd** — extracted into `containerd.install_dir/bin/` (default `/usr/local/bin/`)
 
 Each section is optional; omitting `[cni]` or `[containerd]` from the config skips that component.
-
----
-
-### `install`
-
-```bash
-# Pull using the tag embedded in the image string
-cisak install ubuntu:22.04
-
-# Override / add a tag explicitly
-cisak install ubuntu --tag 24.04
-```
-
-Calls `docker pull <image>[:<tag>]`. Useful as a thin, confirmable wrapper around Docker pulls in provisioning workflows.
 
 ---
 

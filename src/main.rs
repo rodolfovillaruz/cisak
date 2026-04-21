@@ -27,16 +27,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install a container image
-    Install {
-        /// Image name  (e.g. ubuntu:22.04)
-        image: String,
-
-        /// Optional tag override
-        #[arg(short, long)]
-        tag: Option<String>,
-    },
-
     /// Generate a config.toml file in the current directory
     Generate,
 
@@ -193,29 +183,6 @@ fn ensure_gpg_key(key_id: &str, assume_yes: bool) -> Result<()> {
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
-
-/// Pull and register a container image on the host.
-fn install(image: &str, tag: Option<&str>, assume_yes: bool) -> Result<()> {
-    let target = match tag {
-        Some(t) => format!("{image}:{t}"),
-        None => image.to_owned(),
-    };
-
-    println!("→ Installing: {target}");
-
-    let mut cmd = ProcCommand::new("docker");
-    cmd.args(["pull", &target]);
-
-    let status = run_status(&mut cmd, assume_yes)
-        .with_context(|| format!("failed to execute `docker pull` for `{target}`"))?;
-
-    if !status.success() {
-        anyhow::bail!("`docker pull {target}` exited with {status}");
-    }
-
-    println!("✓ {target} installed.");
-    Ok(())
-}
 
 /// Write a `config.toml` scaffold to the current working directory.
 fn generate() -> Result<()> {
@@ -615,7 +582,6 @@ fn main() -> Result<()> {
     let assume_yes = cli.assume_yes;
 
     match cli.command {
-        Command::Install { image, tag } => install(&image, tag.as_deref(), assume_yes)?,
         Command::Generate => generate()?,
         Command::Run => run(assume_yes)?,
     }
