@@ -46,11 +46,13 @@ On a Debian/Ubuntu host all of these (except Docker) are present by default.
 
 ## Installation
 
+Install from [crates.io](https://crates.io/crates/cisak):
+
 ```bash
-cargo install --path .
+cargo install cisak
 ```
 
-Or build a release binary manually:
+Or build from source:
 
 ```bash
 cargo build --release
@@ -195,7 +197,7 @@ Steps that write to system directories automatically retry with `sudo` if the un
 
 ```bash
 # Requires Rust 1.70+ (2021 edition)
-git clone <repo-url>
+git clone https://github.com/rodolfovillaruz/cisak
 cd cisak
 cargo build --release
 ```
