@@ -3,6 +3,7 @@ name    = "cisak"
 version = "0.1.0"
 edition = "2021"
 description = "Container Installation - Swiss Army Knife"
+exclude = [".dump"]
 
 [[bin]]
 name = "cisak"
