@@ -254,22 +254,6 @@ install_dir = "/opt/cni/bin"
 # Binaries are unpacked into <install_dir>/bin/ (e.g. /usr/local/bin/containerd)
 version     = "{containerd_version}"
 install_dir = "/usr/local"
-
-[container]
-rootfs     = "./rootfs"
-log_file   = "./container.log"
-log_format = "json"
-
-[namespaces]
-pid     = true
-network = true
-ipc     = true
-mount   = true
-uts     = true
-
-[resources]
-memory_limit_mb = 512
-cpu_shares      = 1024
 "#
     )
 }
