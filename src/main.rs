@@ -324,11 +324,10 @@ fn install_cni(cfg: &CniConfig, assume_yes: bool) -> Result<()> {
 /// ```
 /// so extracting into `install_dir` (default `/usr/local`) places all
 /// binaries under `<install_dir>/bin/`.
+
 fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
     let version = &cfg.version;
     let install_dir = cfg.install_dir.as_deref().unwrap_or(CONTAINERD_INSTALL_DIR);
-
-    // The release filenames use the bare version number without the leading 'v'.
     let version_bare = version.trim_start_matches('v');
 
     println!("→ Using containerd version: {version}");
@@ -353,9 +352,12 @@ fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
         .context("failed to extract containerd tarball")?;
 
     println!("✓ containerd {version} installed to {install_dir}/bin/");
+
+    // Install systemd unit (prompts user unless --assume-yes)
+    install_containerd_systemd_unit(assume_yes)?;
+
     Ok(())
 }
-
 // ── Checksum verification ─────────────────────────────────────────────────────
 
 /// Verify a SHA-512 checksum file produced by `sha512sum`.
@@ -586,5 +588,100 @@ fn main() -> Result<()> {
         Command::Run => run(assume_yes)?,
     }
 
+    Ok(())
+}
+
+// ── containerd systemd ────────────────────────────────────────────────────────
+
+/// Download and install the containerd.service systemd unit file, then reload
+/// systemd and enable the service.
+fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
+    // Prompt user unless --assume-yes is set
+    if !assume_yes {
+        print!("  Install and enable containerd systemd unit? [y/N] ");
+        io::stdout().flush().context("failed to flush stdout")?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read user input")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => {}
+            _ => {
+                println!("  (skipping systemd unit installation)");
+                return Ok(());
+            }
+        }
+    }
+
+    println!("→ Installing containerd systemd unit…");
+
+    let unit_url =
+        "https://raw.githubusercontent.com/containerd/containerd/main/containerd.service";
+    let unit_dir = Path::new("/usr/local/lib/systemd/system");
+    let unit_path = unit_dir.join("containerd.service");
+
+    let tmp =
+        tempfile::tempdir().context("failed to create temporary directory for systemd unit")?;
+    let tmp_unit_path = tmp.path().join("containerd.service");
+
+    // Download the unit file
+    download(unit_url, &tmp_unit_path, assume_yes)?;
+
+    // Ensure the systemd directory exists
+    if !unit_dir.exists() {
+        let mut cmd = ProcCommand::new("sudo");
+        cmd.args(["mkdir", "-p"]).arg(unit_dir);
+
+        let status =
+            run_status(&mut cmd, assume_yes).context("failed to create systemd directory")?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "failed to create systemd directory `{}`",
+                unit_dir.display()
+            );
+        }
+    }
+
+    // Install the unit file (using sudo if needed)
+    if fs::copy(&tmp_unit_path, &unit_path).is_err() {
+        let mut cmd = ProcCommand::new("sudo");
+        cmd.args(["cp"]).arg(&tmp_unit_path).arg(&unit_path);
+
+        let status =
+            run_status(&mut cmd, assume_yes).context("failed to install systemd unit file")?;
+
+        if !status.success() {
+            anyhow::bail!("failed to install systemd unit file (exit {status})");
+        }
+    }
+
+    // Reload systemd daemon
+    println!("→ Reloading systemd daemon…");
+    let mut reload_cmd = ProcCommand::new("sudo");
+    reload_cmd.arg("systemctl").arg("daemon-reload");
+
+    let reload_status = run_status(&mut reload_cmd, assume_yes)
+        .context("failed to execute `systemctl daemon-reload`")?;
+
+    if !reload_status.success() {
+        anyhow::bail!("`systemctl daemon-reload` failed (exit {reload_status})");
+    }
+
+    // Enable and start the containerd service
+    println!("→ Enabling and starting containerd service…");
+    let mut enable_cmd = ProcCommand::new("sudo");
+    enable_cmd.args(["systemctl", "enable", "--now", "containerd"]);
+
+    let enable_status = run_status(&mut enable_cmd, assume_yes)
+        .context("failed to execute `systemctl enable --now containerd`")?;
+
+    if !enable_status.success() {
+        anyhow::bail!("`systemctl enable --now containerd` failed (exit {enable_status})");
+    }
+
+    println!("✓ containerd systemd unit installed and service enabled");
     Ok(())
 }
