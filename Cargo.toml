@@ -1,6 +1,6 @@
 [package]
 name        = "cisak"
-version     = "0.1.1"
+version     = "0.1.2"
 edition     = "2021"
 description = "Container Installation - Swiss Army Knife: automates download, verification, and installation of runc, CNI plugins, and containerd"
 license     = "MIT"
