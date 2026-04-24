@@ -40,6 +40,8 @@ const RUNC_VERSION: &str = "v1.4.2";
 const CNI_VERSION: &str = "v1.9.1";
 const CONTAINERD_VERSION: &str = "v2.2.3";
 const K8S_VERSION: &str = "v1.36.0";
+// ↓ new
+const CILIUM_VERSION: &str = "v0.19.2";
 
 const CONFIG_FILENAME: &str = "config.toml";
 
@@ -47,11 +49,15 @@ const RUNC_INSTALL_PATH: &str = "/usr/local/sbin/runc";
 const CNI_INSTALL_DIR: &str = "/opt/cni/bin";
 const CONTAINERD_INSTALL_DIR: &str = "/usr/local";
 const K8S_INSTALL_DIR: &str = "/usr/local/bin";
+// ↓ new
+const CILIUM_INSTALL_DIR: &str = "/usr/local/bin";
 
 const RUNC_URL_BASE: &str = "https://github.com/opencontainers/runc/releases/download";
 const CNI_URL_BASE: &str = "https://github.com/containernetworking/plugins/releases/download";
 const CONTAINERD_URL_BASE: &str = "https://github.com/containerd/containerd/releases/download";
 const K8S_URL_BASE: &str = "https://dl.k8s.io";
+// ↓ new
+const CILIUM_URL_BASE: &str = "https://github.com/cilium/cilium-cli/releases/download";
 
 const SYSCTL_CONF_PATH: &str = "/etc/sysctl.d/99-cisak.conf";
 const SYSCTL_CONF_CONTENT: &str = "net.ipv4.ip_forward = 1\n";
@@ -88,6 +94,8 @@ struct Config {
     containerd: Option<ContainerdConfig>,
     network: Option<NetworkConfig>,
     kubernetes: Option<KubernetesConfig>,
+    // ↓ new
+    cilium: Option<CiliumConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +138,17 @@ struct KubernetesConfig {
     /// Directory for `kubelet`. Defaults to `/usr/bin`.
     kubelet_install_dir: Option<String>,
 }
+
+// ↓ new ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CiliumConfig {
+    version: String,
+    /// Directory for the `cilium` binary. Defaults to `/usr/local/bin`.
+    install_dir: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn load_config() -> Result<Config> {
     let raw = fs::read_to_string(CONFIG_FILENAME)
@@ -242,20 +261,29 @@ fn generate() -> Result<()> {
         anyhow::bail!("`{CONFIG_FILENAME}` already exists in the current directory");
     }
 
-    let content = build_config(RUNC_VERSION, CNI_VERSION, CONTAINERD_VERSION, K8S_VERSION);
+    // ↓ CILIUM_VERSION added
+    let content = build_config(
+        RUNC_VERSION,
+        CNI_VERSION,
+        CONTAINERD_VERSION,
+        K8S_VERSION,
+        CILIUM_VERSION,
+    );
 
     fs::write(path, &content).with_context(|| format!("failed to write `{CONFIG_FILENAME}`"))?;
 
     println!(
         "✓ Created {CONFIG_FILENAME}  \
          (runc {RUNC_VERSION}, CNI plugins {CNI_VERSION}, \
-         containerd {CONTAINERD_VERSION}, Kubernetes {K8S_VERSION})"
+         containerd {CONTAINERD_VERSION}, Kubernetes {K8S_VERSION}, \
+         Cilium CLI {CILIUM_VERSION})"
     );
     Ok(())
 }
 
 /// Download runc + GPG signature, verify, install; then optionally install CNI
-/// plugins, containerd, and Kubernetes binaries as declared in config.toml.
+/// plugins, containerd, Kubernetes binaries, and the Cilium CLI as declared in
+/// config.toml.
 fn run(assume_yes: bool) -> Result<()> {
     let cfg = load_config()?;
 
@@ -312,6 +340,16 @@ fn run(assume_yes: bool) -> Result<()> {
         install_kubernetes(k8s_cfg, assume_yes)?;
     } else {
         println!("  (no [kubernetes] section in config – skipping kubelet/kubeadm install)");
+    }
+
+    // ── Cilium CLI ────────────────────────────────────────────────────────────
+    // ↓ new block
+
+    println!();
+    if let Some(cilium_cfg) = &cfg.cilium {
+        install_cilium(cilium_cfg, assume_yes)?;
+    } else {
+        println!("  (no [cilium] section in config – skipping Cilium CLI install)");
     }
 
     // ── IPv4 forwarding ───────────────────────────────────────────────────────
@@ -474,6 +512,63 @@ fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
+// ── Cilium CLI installation ───────────────────────────────────────────────────
+
+/// Download, verify (SHA-256), and install the Cilium CLI binary.
+///
+/// Release layout on GitHub:
+/// ```text
+/// https://github.com/cilium/cilium-cli/releases/download/<version>/cilium-linux-amd64.tar.gz
+/// https://github.com/cilium/cilium-cli/releases/download/<version>/cilium-linux-amd64.tar.gz.sha256sum
+/// ```
+///
+/// The tarball contains a single `cilium` binary at its root.  After
+/// extraction the binary is moved to `<install_dir>/cilium` (default
+/// `/usr/local/bin/cilium`).
+fn install_cilium(cfg: &CiliumConfig, assume_yes: bool) -> Result<()> {
+    let version = &cfg.version;
+    let install_dir = cfg.install_dir.as_deref().unwrap_or(CILIUM_INSTALL_DIR);
+
+    println!("→ Using Cilium CLI version: {version}");
+
+    let filename = "cilium-linux-amd64.tar.gz";
+    let sha256_filename = format!("{filename}.sha256sum");
+
+    let tgz_url = format!("{CILIUM_URL_BASE}/{version}/{filename}");
+    let sha256_url = format!("{CILIUM_URL_BASE}/{version}/{sha256_filename}");
+
+    let tmp = tempfile::tempdir().context("failed to create temporary directory for Cilium")?;
+    let tgz_path = tmp.path().join(filename);
+    let sha256_path = tmp.path().join(&sha256_filename);
+
+    download(&tgz_url, &tgz_path, assume_yes)?;
+    download(&sha256_url, &sha256_path, assume_yes)?;
+
+    // The sha256sum file uses standard `sha256sum` format:
+    //   <digest>  cilium-linux-amd64.tar.gz
+    // so we can reuse `verify_sha256` directly.
+    verify_sha256(&tgz_path, &sha256_path, assume_yes)?;
+
+    // Extract into a dedicated subdirectory so the `cilium` binary is easy to
+    // locate regardless of what else might be in the temp dir.
+    let extract_dir = tmp.path().join("cilium-extract");
+    fs::create_dir_all(&extract_dir).context("failed to create Cilium extraction directory")?;
+
+    println!("→ Extracting Cilium CLI…");
+    extract_tarball(&tgz_path, &extract_dir, assume_yes)
+        .context("failed to extract Cilium tarball")?;
+
+    // The tarball places the `cilium` binary directly at the archive root, so
+    // after extraction it lives at `<extract_dir>/cilium`.
+    let bin_src = extract_dir.join("cilium");
+    let bin_dest = Path::new(install_dir).join("cilium");
+
+    install_binary(&bin_src, &bin_dest, assume_yes).context("failed to install cilium binary")?;
+
+    println!("✓ Cilium CLI {version} installed to {}", bin_dest.display());
+    Ok(())
+}
+
 // ── Checksum verification ─────────────────────────────────────────────────────
 
 /// Verify a SHA-512 checksum file produced by `sha512sum`.
@@ -517,12 +612,15 @@ fn verify_sha512(tgz: &Path, sha512_file: &Path, assume_yes: bool) -> Result<()>
 
 /// Verify a SHA-256 checksum file produced by `sha256sum`.
 ///
-/// The containerd release checksum file contains a line of the form:
+/// The checksum file contains a line of the form:
 /// ```text
-/// <hex-digest>  containerd-<version>-linux-amd64.tar.gz
+/// <hex-digest>  <filename>
 /// ```
-/// Both the tarball and the checksum file must live in the same directory so
-/// that the bare filename inside the checksum file resolves correctly.
+/// Both the subject file and the checksum file must live in the same directory
+/// so that the bare filename inside the checksum file resolves correctly.
+///
+/// Used for containerd and the Cilium CLI (both ship standard `sha256sum`
+/// output files).
 fn verify_sha256(tgz: &Path, sha256_file: &Path, assume_yes: bool) -> Result<()> {
     println!("→ Verifying SHA-256 checksum…");
 
@@ -983,6 +1081,8 @@ fn build_config(
     cni_version: &str,
     containerd_version: &str,
     k8s_version: &str,
+    // ↓ new parameter
+    cilium_version: &str,
 ) -> String {
     format!(
         r#"# Generated by cisak
@@ -1006,6 +1106,11 @@ install_dir = "/usr/local"
 version             = "{k8s_version}"
 install_dir         = "/usr/local/bin"
 kubelet_install_dir = "/usr/bin"
+
+[cilium]
+# Cilium CLI binary installed to <install_dir>/cilium.
+version     = "{cilium_version}"
+install_dir = "/usr/local/bin"
 
 [network]
 # Set net.ipv4.ip_forward = 1 (required for container networking).
