@@ -218,7 +218,6 @@ fn generate() -> Result<()> {
 
 /// Download runc + GPG signature, verify, install; then optionally install CNI
 /// plugins and containerd as declared in config.toml.
-
 fn run(assume_yes: bool) -> Result<()> {
     let cfg = load_config()?;
 
@@ -325,7 +324,6 @@ fn install_cni(cfg: &CniConfig, assume_yes: bool) -> Result<()> {
 /// ```
 /// so extracting into `install_dir` (default `/usr/local`) places all
 /// binaries under `<install_dir>/bin/`.
-
 fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
     let version = &cfg.version;
     let install_dir = cfg.install_dir.as_deref().unwrap_or(CONTAINERD_INSTALL_DIR);
@@ -494,17 +492,15 @@ fn verify_gpg_signature(bin: &Path, sig: &Path, assume_yes: bool) -> Result<()> 
 /// unprivileged attempt fails (e.g. writing into `/usr/local`).
 fn extract_tarball(tgz: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
     // Ensure the destination directory exists.
-    if !dest.exists() {
-        if fs::create_dir_all(dest).is_err() {
-            let mut cmd = ProcCommand::new("sudo");
-            cmd.args(["mkdir", "-p"]).arg(dest);
+    if !dest.exists() && fs::create_dir_all(dest).is_err() {
+        let mut cmd = ProcCommand::new("sudo");
+        cmd.args(["mkdir", "-p"]).arg(dest);
 
-            let status =
-                run_status(&mut cmd, assume_yes).context("failed to create install directory")?;
+        let status =
+            run_status(&mut cmd, assume_yes).context("failed to create install directory")?;
 
-            if !status.success() {
-                anyhow::bail!("failed to create install directory `{}`", dest.display());
-            }
+        if !status.success() {
+            anyhow::bail!("failed to create install directory `{}`", dest.display());
         }
     }
 
