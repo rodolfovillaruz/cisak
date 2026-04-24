@@ -943,13 +943,13 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
     // Enable and start the containerd service
     println!("→ Enabling and starting containerd service…");
     let mut enable_cmd = ProcCommand::new("sudo");
-    enable_cmd.args(["systemctl", "enable", "--now", "containerd"]);
+    enable_cmd.args(["systemctl", "enable", "containerd"]);
 
     let enable_status = run_status(&mut enable_cmd, assume_yes)
-        .context("failed to execute `systemctl enable --now containerd`")?;
+        .context("failed to execute `systemctl enable containerd`")?;
 
     if !enable_status.success() {
-        anyhow::bail!("`systemctl enable --now containerd` failed (exit {enable_status})");
+        anyhow::bail!("`systemctl enable containerd` failed (exit {enable_status})");
     }
 
     println!("✓ containerd systemd unit installed and service enabled");
@@ -1023,12 +1023,12 @@ fn install_kubernetes_systemd_units(assume_yes: bool) -> Result<()> {
 
     println!("→ Enabling kubelet service…");
     let mut cmd = ProcCommand::new("sudo");
-    cmd.args(["systemctl", "enable", "--now", "kubelet"]);
+    cmd.args(["systemctl", "enable", "kubelet"]);
 
-    let status = run_status(&mut cmd, assume_yes)
-        .context("failed to execute `systemctl enable --now kubelet`")?;
+    let status =
+        run_status(&mut cmd, assume_yes).context("failed to execute `systemctl enable kubelet`")?;
     if !status.success() {
-        anyhow::bail!("`systemctl enable --now kubelet` failed (exit {status})");
+        anyhow::bail!("`systemctl enable kubelet` failed (exit {status})");
     }
 
     println!("✓ kubelet systemd unit installed and service enabled");
