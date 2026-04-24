@@ -61,7 +61,11 @@ const SYSCTL_CONF_CONTENT: &str = "net.ipv4.ip_forward = 1\n";
 /// The download URLs are assembled as:
 /// `<K8S_URL_BASE>/<version>/bin/linux/amd64/<name>`
 /// `<K8S_URL_BASE>/<version>/bin/linux/amd64/<name>.sha256`
-const K8S_BINARIES: &[&str] = &["kubelet", "kubeadm"];
+const K8S_BINARIES: &[(&str, &str)] = &[
+    ("kubelet", KUBELET_INSTALL_DIR), // /usr/bin
+    ("kubeadm", K8S_INSTALL_DIR),     // /usr/local/bin
+    ("kubectl", K8S_INSTALL_DIR),     // /usr/local/bin
+];
 
 const KUBELET_SERVICE_URL: &str = "https://raw.githubusercontent.com/kubernetes/release/master/\
      cmd/krel/templates/latest/kubelet/kubelet.service";
@@ -72,6 +76,8 @@ const KUBEADM_CONF_URL: &str = "https://raw.githubusercontent.com/kubernetes/rel
 const KUBELET_SERVICE_PATH: &str = "/usr/lib/systemd/system/kubelet.service";
 /// Drop-in that `kubeadm` uses to inject environment variables into kubelet.
 const KUBEADM_DROP_IN_PATH: &str = "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf";
+
+const KUBELET_INSTALL_DIR: &str = "/usr/bin";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -118,11 +124,11 @@ struct NetworkConfig {
 
 #[derive(Debug, Deserialize)]
 struct KubernetesConfig {
-    /// Kubernetes version to download (e.g. `"v1.36.0"`).
     version: String,
-    /// Directory where `kubelet` and `kubeadm` are installed.
-    /// Defaults to `/usr/local/bin`.
+    /// Directory for `kubeadm` and `kubectl`. Defaults to `/usr/local/bin`.
     install_dir: Option<String>,
+    /// Directory for `kubelet`. Defaults to `/usr/bin`.
+    kubelet_install_dir: Option<String>,
 }
 
 fn load_config() -> Result<Config> {
@@ -415,14 +421,25 @@ fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
 fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
     let version = &cfg.version;
     let install_dir = cfg.install_dir.as_deref().unwrap_or(K8S_INSTALL_DIR);
+    let kubelet_dir = cfg
+        .kubelet_install_dir
+        .as_deref()
+        .unwrap_or(KUBELET_INSTALL_DIR);
 
     println!("→ Using Kubernetes version: {version}");
 
     let base = format!("{K8S_URL_BASE}/{version}/bin/linux/amd64");
 
-    for &binary in K8S_BINARIES {
+    for &(binary, _) in K8S_BINARIES {
+        // Pick the right destination directory per binary.
+        let binary_dir = if binary == "kubelet" {
+            kubelet_dir
+        } else {
+            install_dir
+        };
+
         println!();
-        println!("→ Installing {binary}…");
+        println!("→ Installing {binary} → {binary_dir}…");
 
         let bin_url = format!("{base}/{binary}");
         let sha256_url = format!("{base}/{binary}.sha256");
@@ -438,7 +455,7 @@ fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
         verify_k8s_sha256(&bin_path, &sha256_path, assume_yes)
             .with_context(|| format!("checksum verification failed for {binary}"))?;
 
-        let dest = Path::new(install_dir).join(binary);
+        let dest = Path::new(binary_dir).join(binary);
         install_binary(&bin_path, &dest, assume_yes)
             .with_context(|| format!("failed to install {binary}"))?;
 
@@ -446,9 +463,11 @@ fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
     }
 
     println!();
-    println!("✓ Kubernetes binaries installed to {install_dir}");
+    println!(
+        "✓ Kubernetes binaries installed \
+         (kubelet → {kubelet_dir}, kubeadm/kubectl → {install_dir})"
+    );
 
-    // ── systemd units ─────────────────────────────────────────────────────────
     println!();
     install_kubernetes_systemd_units(assume_yes)?;
 
@@ -983,9 +1002,10 @@ version     = "{containerd_version}"
 install_dir = "/usr/local"
 
 [kubernetes]
-# Installs kubelet and kubeadm from dl.k8s.io into install_dir.
-version     = "{k8s_version}"
-install_dir = "/usr/local/bin"
+# kubelet is installed to kubelet_install_dir; kubeadm + kubectl to install_dir.
+version             = "{k8s_version}"
+install_dir         = "/usr/local/bin"
+kubelet_install_dir = "/usr/bin"
 
 [network]
 # Set net.ipv4.ip_forward = 1 (required for container networking).
