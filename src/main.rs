@@ -63,6 +63,16 @@ const SYSCTL_CONF_CONTENT: &str = "net.ipv4.ip_forward = 1\n";
 /// `<K8S_URL_BASE>/<version>/bin/linux/amd64/<name>.sha256`
 const K8S_BINARIES: &[&str] = &["kubelet", "kubeadm"];
 
+const KUBELET_SERVICE_URL: &str = "https://raw.githubusercontent.com/kubernetes/release/master/\
+     cmd/krel/templates/latest/kubelet/kubelet.service";
+const KUBEADM_CONF_URL: &str = "https://raw.githubusercontent.com/kubernetes/release/master/\
+     cmd/krel/templates/latest/kubeadm/10-kubeadm.conf";
+
+/// Where `kubelet.service` is installed on a systemd host.
+const KUBELET_SERVICE_PATH: &str = "/usr/lib/systemd/system/kubelet.service";
+/// Drop-in that `kubeadm` uses to inject environment variables into kubelet.
+const KUBEADM_DROP_IN_PATH: &str = "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf";
+
 // ── Config ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -437,6 +447,11 @@ fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
 
     println!();
     println!("✓ Kubernetes binaries installed to {install_dir}");
+
+    // ── systemd units ─────────────────────────────────────────────────────────
+    println!();
+    install_kubernetes_systemd_units(assume_yes)?;
+
     Ok(())
 }
 
@@ -821,6 +836,125 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
     }
 
     println!("✓ containerd systemd unit installed and service enabled");
+    Ok(())
+}
+
+// ── Kubernetes systemd ────────────────────────────────────────────────────────
+
+/// Download and install the kubelet systemd unit and kubeadm drop-in, then
+/// reload systemd and enable the service.
+///
+/// Files installed:
+/// - `kubelet.service`  → [`KUBELET_SERVICE_PATH`]  (`/usr/lib/systemd/system/`)
+/// - `10-kubeadm.conf`  → [`KUBEADM_DROP_IN_PATH`]  (`/etc/systemd/system/kubelet.service.d/`)
+///
+/// `kubelet` is enabled (but not necessarily running yet — it will enter its
+/// final running state once `kubeadm init` or `kubeadm join` is executed).
+fn install_kubernetes_systemd_units(assume_yes: bool) -> Result<()> {
+    if !assume_yes {
+        print!("  Install and enable kubelet systemd unit? [y/N] ");
+        io::stdout().flush().context("failed to flush stdout")?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read user input")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => {}
+            _ => {
+                println!("  (skipping kubelet systemd unit installation)");
+                return Ok(());
+            }
+        }
+    }
+
+    println!("→ Installing kubelet systemd unit files…");
+
+    let tmp = tempfile::tempdir()
+        .context("failed to create temporary directory for kubelet systemd units")?;
+
+    // ── kubelet.service ───────────────────────────────────────────────────────
+
+    let tmp_service = tmp.path().join("kubelet.service");
+    download(KUBELET_SERVICE_URL, &tmp_service, assume_yes)?;
+
+    install_system_file(&tmp_service, Path::new(KUBELET_SERVICE_PATH), assume_yes)
+        .context("failed to install kubelet.service")?;
+
+    // ── 10-kubeadm.conf (drop-in) ─────────────────────────────────────────────
+
+    let tmp_conf = tmp.path().join("10-kubeadm.conf");
+    download(KUBEADM_CONF_URL, &tmp_conf, assume_yes)?;
+
+    install_system_file(&tmp_conf, Path::new(KUBEADM_DROP_IN_PATH), assume_yes)
+        .context("failed to install 10-kubeadm.conf")?;
+
+    // ── systemd reload ────────────────────────────────────────────────────────
+
+    println!("→ Reloading systemd daemon…");
+    let mut cmd = ProcCommand::new("sudo");
+    cmd.args(["systemctl", "daemon-reload"]);
+
+    let status =
+        run_status(&mut cmd, assume_yes).context("failed to execute `systemctl daemon-reload`")?;
+    if !status.success() {
+        anyhow::bail!("`systemctl daemon-reload` failed (exit {status})");
+    }
+
+    // ── enable kubelet ────────────────────────────────────────────────────────
+
+    println!("→ Enabling kubelet service…");
+    let mut cmd = ProcCommand::new("sudo");
+    cmd.args(["systemctl", "enable", "--now", "kubelet"]);
+
+    let status = run_status(&mut cmd, assume_yes)
+        .context("failed to execute `systemctl enable --now kubelet`")?;
+    if !status.success() {
+        anyhow::bail!("`systemctl enable --now kubelet` failed (exit {status})");
+    }
+
+    println!("✓ kubelet systemd unit installed and service enabled");
+    Ok(())
+}
+
+/// Ensure `dest`'s parent directory exists, then copy `src` → `dest`.
+///
+/// Falls back to `sudo cp` when an unprivileged copy fails (e.g. writing into
+/// `/usr/lib/systemd/system` or `/etc/systemd/system/kubelet.service.d`).
+fn install_system_file(src: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
+    // Ensure the parent directory exists.
+    if let Some(parent) = dest.parent() {
+        if !parent.exists() {
+            // Try unprivileged first; fall back to sudo.
+            if fs::create_dir_all(parent).is_err() {
+                let mut cmd = ProcCommand::new("sudo");
+                cmd.args(["mkdir", "-p"]).arg(parent);
+
+                let status = run_status(&mut cmd, assume_yes)
+                    .with_context(|| format!("failed to create `{}`", parent.display()))?;
+                if !status.success() {
+                    anyhow::bail!("failed to create directory `{}`", parent.display());
+                }
+            }
+        }
+    }
+
+    // Copy the file; fall back to sudo when the destination is root-owned.
+    if fs::copy(src, dest).is_err() {
+        let mut cmd = ProcCommand::new("sudo");
+        cmd.args(["cp"]).arg(src).arg(dest);
+
+        let status = run_status(&mut cmd, assume_yes)
+            .with_context(|| format!("failed to copy to `{}`", dest.display()))?;
+        if !status.success() {
+            anyhow::bail!(
+                "failed to install file to `{}` (exit {status})",
+                dest.display()
+            );
+        }
+    }
+
     Ok(())
 }
 
