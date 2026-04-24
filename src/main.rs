@@ -943,13 +943,13 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
     // Enable and start the containerd service
     println!("→ Enabling and starting containerd service…");
     let mut enable_cmd = ProcCommand::new("sudo");
-    enable_cmd.args(["systemctl", "enable", "containerd"]);
+    enable_cmd.args(["systemctl", "enable", "--now", "containerd"]);
 
     let enable_status = run_status(&mut enable_cmd, assume_yes)
-        .context("failed to execute `systemctl enable containerd`")?;
+        .context("failed to execute `systemctl enable --now containerd`")?;
 
     if !enable_status.success() {
-        anyhow::bail!("`systemctl enable containerd` failed (exit {enable_status})");
+        anyhow::bail!("`systemctl enable --now containerd` failed (exit {enable_status})");
     }
 
     println!("✓ containerd systemd unit installed and service enabled");
