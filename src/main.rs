@@ -39,19 +39,29 @@ enum Command {
 const RUNC_VERSION: &str = "v1.4.2";
 const CNI_VERSION: &str = "v1.9.1";
 const CONTAINERD_VERSION: &str = "v2.2.3";
+const K8S_VERSION: &str = "v1.36.0";
 
 const CONFIG_FILENAME: &str = "config.toml";
 
 const RUNC_INSTALL_PATH: &str = "/usr/local/sbin/runc";
 const CNI_INSTALL_DIR: &str = "/opt/cni/bin";
 const CONTAINERD_INSTALL_DIR: &str = "/usr/local";
+const K8S_INSTALL_DIR: &str = "/usr/local/bin";
 
 const RUNC_URL_BASE: &str = "https://github.com/opencontainers/runc/releases/download";
 const CNI_URL_BASE: &str = "https://github.com/containernetworking/plugins/releases/download";
 const CONTAINERD_URL_BASE: &str = "https://github.com/containerd/containerd/releases/download";
+const K8S_URL_BASE: &str = "https://dl.k8s.io";
 
 const SYSCTL_CONF_PATH: &str = "/etc/sysctl.d/99-cisak.conf";
 const SYSCTL_CONF_CONTENT: &str = "net.ipv4.ip_forward = 1\n";
+
+/// Kubernetes binaries to install. Each tuple is `(binary name, sha256 file suffix)`.
+///
+/// The download URLs are assembled as:
+/// `<K8S_URL_BASE>/<version>/bin/linux/amd64/<name>`
+/// `<K8S_URL_BASE>/<version>/bin/linux/amd64/<name>.sha256`
+const K8S_BINARIES: &[&str] = &["kubelet", "kubeadm"];
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -61,6 +71,7 @@ struct Config {
     cni: Option<CniConfig>,
     containerd: Option<ContainerdConfig>,
     network: Option<NetworkConfig>,
+    kubernetes: Option<KubernetesConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +95,7 @@ struct ContainerdConfig {
     /// Defaults to `/usr/local`; binaries end up in `<install_dir>/bin/`.
     install_dir: Option<String>,
 }
+
 #[derive(Debug, Deserialize)]
 struct NetworkConfig {
     /// Enable net.ipv4.ip_forward (required for container networking).
@@ -92,6 +104,15 @@ struct NetworkConfig {
     /// Drop-in file used to persist the setting across reboots.
     /// Defaults to `/etc/sysctl.d/99-cisak.conf`.
     sysctl_conf_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KubernetesConfig {
+    /// Kubernetes version to download (e.g. `"v1.36.0"`).
+    version: String,
+    /// Directory where `kubelet` and `kubeadm` are installed.
+    /// Defaults to `/usr/local/bin`.
+    install_dir: Option<String>,
 }
 
 fn load_config() -> Result<Config> {
@@ -205,19 +226,20 @@ fn generate() -> Result<()> {
         anyhow::bail!("`{CONFIG_FILENAME}` already exists in the current directory");
     }
 
-    let content = build_config(RUNC_VERSION, CNI_VERSION, CONTAINERD_VERSION);
+    let content = build_config(RUNC_VERSION, CNI_VERSION, CONTAINERD_VERSION, K8S_VERSION);
 
     fs::write(path, &content).with_context(|| format!("failed to write `{CONFIG_FILENAME}`"))?;
 
     println!(
         "✓ Created {CONFIG_FILENAME}  \
-         (runc {RUNC_VERSION}, CNI plugins {CNI_VERSION}, containerd {CONTAINERD_VERSION})"
+         (runc {RUNC_VERSION}, CNI plugins {CNI_VERSION}, \
+         containerd {CONTAINERD_VERSION}, Kubernetes {K8S_VERSION})"
     );
     Ok(())
 }
 
 /// Download runc + GPG signature, verify, install; then optionally install CNI
-/// plugins and containerd as declared in config.toml.
+/// plugins, containerd, and Kubernetes binaries as declared in config.toml.
 fn run(assume_yes: bool) -> Result<()> {
     let cfg = load_config()?;
 
@@ -265,6 +287,15 @@ fn run(assume_yes: bool) -> Result<()> {
         install_containerd(containerd_cfg, assume_yes)?;
     } else {
         println!("  (no [containerd] section in config – skipping containerd install)");
+    }
+
+    // ── Kubernetes binaries ───────────────────────────────────────────────────
+
+    println!();
+    if let Some(k8s_cfg) = &cfg.kubernetes {
+        install_kubernetes(k8s_cfg, assume_yes)?;
+    } else {
+        println!("  (no [kubernetes] section in config – skipping kubelet/kubeadm install)");
     }
 
     // ── IPv4 forwarding ───────────────────────────────────────────────────────
@@ -357,6 +388,58 @@ fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
 
     Ok(())
 }
+
+// ── Kubernetes installation ───────────────────────────────────────────────────
+
+/// Download, verify (SHA-256), and install `kubelet` and `kubeadm`.
+///
+/// Download layout on dl.k8s.io:
+/// ```text
+/// https://dl.k8s.io/<version>/bin/linux/amd64/<binary>
+/// https://dl.k8s.io/<version>/bin/linux/amd64/<binary>.sha256
+/// ```
+///
+/// The `.sha256` file contains a bare 64-character hex digest with no filename,
+/// so [`verify_k8s_sha256`] synthesises a proper `sha256sum`-format line before
+/// running the check.
+fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
+    let version = &cfg.version;
+    let install_dir = cfg.install_dir.as_deref().unwrap_or(K8S_INSTALL_DIR);
+
+    println!("→ Using Kubernetes version: {version}");
+
+    let base = format!("{K8S_URL_BASE}/{version}/bin/linux/amd64");
+
+    for &binary in K8S_BINARIES {
+        println!();
+        println!("→ Installing {binary}…");
+
+        let bin_url = format!("{base}/{binary}");
+        let sha256_url = format!("{base}/{binary}.sha256");
+
+        let tmp = tempfile::tempdir()
+            .with_context(|| format!("failed to create temporary directory for {binary}"))?;
+        let bin_path = tmp.path().join(binary);
+        let sha256_path = tmp.path().join(format!("{binary}.sha256"));
+
+        download(&bin_url, &bin_path, assume_yes)?;
+        download(&sha256_url, &sha256_path, assume_yes)?;
+
+        verify_k8s_sha256(&bin_path, &sha256_path, assume_yes)
+            .with_context(|| format!("checksum verification failed for {binary}"))?;
+
+        let dest = Path::new(install_dir).join(binary);
+        install_binary(&bin_path, &dest, assume_yes)
+            .with_context(|| format!("failed to install {binary}"))?;
+
+        println!("✓ {binary} {version} installed to {}", dest.display());
+    }
+
+    println!();
+    println!("✓ Kubernetes binaries installed to {install_dir}");
+    Ok(())
+}
+
 // ── Checksum verification ─────────────────────────────────────────────────────
 
 /// Verify a SHA-512 checksum file produced by `sha512sum`.
@@ -428,6 +511,64 @@ fn verify_sha256(tgz: &Path, sha256_file: &Path, assume_yes: bool) -> Result<()>
         anyhow::bail!(
             "SHA-256 verification FAILED for `{}`:\n{}\n{}",
             tgz.display(),
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
+
+    println!("✓ SHA-256 checksum verified");
+    Ok(())
+}
+
+/// Verify a Kubernetes-style SHA-256 file against a downloaded binary.
+///
+/// Unlike the `sha256sum` format used by containerd, Kubernetes `.sha256` files
+/// contain **only the bare hex digest** with no filename.  This function:
+///
+/// 1. Reads the digest from `sha256_file`.
+/// 2. Synthesises a proper `sha256sum`-format line (`<digest>  <filename>`).
+/// 3. Writes that line to a temporary file in the same directory as `binary`.
+/// 4. Runs `sha256sum --check <tmp>` in that directory.
+/// 5. Removes the temporary file before returning.
+fn verify_k8s_sha256(binary: &Path, sha256_file: &Path, assume_yes: bool) -> Result<()> {
+    println!("→ Verifying SHA-256 checksum…");
+
+    // The k8s .sha256 file contains only the bare hex digest.
+    let raw = fs::read_to_string(sha256_file)
+        .with_context(|| format!("failed to read `{}`", sha256_file.display()))?;
+    let digest = raw.trim();
+
+    let dir = binary
+        .parent()
+        .context("binary path has no parent directory")?;
+    let binary_filename = binary
+        .file_name()
+        .context("binary path has no filename component")?
+        .to_string_lossy();
+
+    // Build a sha256sum-compatible line and write it to a temporary check file.
+    let check_filename = format!("{binary_filename}.sha256check");
+    let check_path = dir.join(&check_filename);
+    let check_content = format!("{digest}  {binary_filename}\n");
+
+    fs::write(&check_path, &check_content)
+        .context("failed to write formatted SHA-256 check file")?;
+
+    let mut cmd = ProcCommand::new("sha256sum");
+    cmd.arg("--check").arg(&check_filename).current_dir(dir);
+
+    let output = run_output(&mut cmd, assume_yes)
+        .context("failed to execute `sha256sum --check` (is sha256sum installed?)")?;
+
+    // Always clean up the temporary check file.
+    let _ = fs::remove_file(&check_path);
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "SHA-256 verification FAILED for `{}`:\n{}\n{}",
+            binary.display(),
             stdout.trim(),
             stderr.trim()
         );
@@ -684,7 +825,12 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
 }
 
 /// Return the rendered TOML configuration string.
-fn build_config(runc_version: &str, cni_version: &str, containerd_version: &str) -> String {
+fn build_config(
+    runc_version: &str,
+    cni_version: &str,
+    containerd_version: &str,
+    k8s_version: &str,
+) -> String {
     format!(
         r#"# Generated by cisak
 
@@ -702,6 +848,11 @@ install_dir = "/opt/cni/bin"
 version     = "{containerd_version}"
 install_dir = "/usr/local"
 
+[kubernetes]
+# Installs kubelet and kubeadm from dl.k8s.io into install_dir.
+version     = "{k8s_version}"
+install_dir = "/usr/local/bin"
+
 [network]
 # Set net.ipv4.ip_forward = 1 (required for container networking).
 # The setting is written to sysctl_conf_path for persistence across reboots.
@@ -710,6 +861,7 @@ sysctl_conf_path = "/etc/sysctl.d/99-cisak.conf"
 "#
     )
 }
+
 // ── IPv4 forwarding ───────────────────────────────────────────────────────────
 
 /// Enable `net.ipv4.ip_forward` at runtime and persist it via a sysctl drop-in file.
