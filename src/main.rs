@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use serde::Deserialize;
 use std::{
     fs,
@@ -32,6 +33,9 @@ enum Command {
 
     /// Download, verify, and install runc + CNI plugins + containerd defined in config.toml
     Run,
+
+    /// Check for newer versions of installed components
+    Outdated,
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -856,6 +860,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Generate => generate()?,
         Command::Run => run(assume_yes)?,
+        Command::Outdated => outdated()?,
     }
 
     Ok(())
@@ -1234,4 +1239,181 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
 
     println!("✓ net.ipv4.ip_forward = 1 (persistent via {conf_path_str})");
     Ok(())
+}
+
+// ── Outdated command ──────────────────────────────────────────────────────────
+
+/// Check for newer versions of installed components.
+fn outdated() -> Result<()> {
+    let cfg = load_config()?;
+
+    println!(
+        "{}\n",
+        "Checking for newer versions...".bright_blue().bold()
+    );
+
+    // Check runc
+    match fetch_latest_github_release("opencontainers", "runc") {
+        Ok(latest) => check_and_display_version("runc", &cfg.runtime.version, &latest),
+        Err(e) => println!("  {}: {}", "runc".red(), format!("✗ {}", e).red()),
+    }
+
+    // Check CNI plugins
+    if let Some(cni_cfg) = &cfg.cni {
+        match fetch_latest_github_release("containernetworking", "plugins") {
+            Ok(latest) => check_and_display_version("CNI plugins", &cni_cfg.version, &latest),
+            Err(e) => println!("  {}: {}", "CNI plugins".red(), format!("✗ {}", e).red()),
+        }
+    }
+
+    // Check containerd
+    if let Some(containerd_cfg) = &cfg.containerd {
+        match fetch_latest_github_release("containerd", "containerd") {
+            Ok(latest) => check_and_display_version("containerd", &containerd_cfg.version, &latest),
+            Err(e) => println!("  {}: {}", "containerd".red(), format!("✗ {}", e).red()),
+        }
+    }
+
+    // Check Kubernetes
+    if let Some(k8s_cfg) = &cfg.kubernetes {
+        match fetch_latest_k8s_version() {
+            Ok(latest) => check_and_display_version("Kubernetes", &k8s_cfg.version, &latest),
+            Err(e) => println!("  {}: {}", "Kubernetes".red(), format!("✗ {}", e).red()),
+        }
+    }
+
+    // Check Cilium CLI
+    if let Some(cilium_cfg) = &cfg.cilium {
+        match fetch_latest_github_release("cilium", "cilium-cli") {
+            Ok(latest) => check_and_display_version("Cilium CLI", &cilium_cfg.version, &latest),
+            Err(e) => println!("  {}: {}", "Cilium CLI".red(), format!("✗ {}", e).red()),
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Fetch the latest release tag from a GitHub repository.
+///
+/// Uses the GitHub API to get the latest release information and extracts
+/// the `tag_name` field from the JSON response.
+fn fetch_latest_github_release(owner: &str, repo: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+
+    let output = ProcCommand::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--location",
+            "--header",
+            "Accept: application/vnd.github.v3+json",
+        ])
+        .arg(&url)
+        .output()
+        .context("failed to execute curl for GitHub API")?;
+
+    if !output.status.success() {
+        anyhow::bail!("HTTP request failed");
+    }
+
+    let json_str =
+        String::from_utf8(output.stdout).context("failed to parse GitHub API response as UTF-8")?;
+
+    // Parse JSON to find the tag_name (simple string matching to avoid extra dependencies)
+    if let Some(pos) = json_str.find("\"tag_name\":\"") {
+        let start = pos + "\"tag_name\":\"".len();
+        if let Some(end_pos) = json_str[start..].find('"') {
+            let tag = json_str[start..start + end_pos].to_string();
+            return Ok(tag);
+        }
+    }
+
+    anyhow::bail!("could not parse tag_name from GitHub API")
+}
+
+/// Fetch the latest Kubernetes release version.
+///
+/// Kubernetes publishes the latest stable version at `https://dl.k8s.io/release/stable.txt`.
+fn fetch_latest_k8s_version() -> Result<String> {
+    let url = "https://dl.k8s.io/release/stable.txt";
+
+    let output = ProcCommand::new("curl")
+        .args(["--fail", "--silent", "--location"])
+        .arg(url)
+        .output()
+        .context("failed to fetch Kubernetes version")?;
+
+    if !output.status.success() {
+        anyhow::bail!("HTTP request failed");
+    }
+
+    let version = String::from_utf8(output.stdout)
+        .context("failed to parse response as UTF-8")?
+        .trim()
+        .to_string();
+
+    Ok(version)
+}
+
+/// Compare two semantic versions.
+///
+/// Returns `true` if `latest` is newer than `current`.
+/// Strips the `v` prefix and compares version numbers numerically.
+fn is_version_newer(latest: &str, current: &str) -> bool {
+    let latest_clean = latest.trim_start_matches('v');
+    let current_clean = current.trim_start_matches('v');
+
+    if latest_clean == current_clean {
+        return false;
+    }
+
+    // Split by dots and compare numerically (e.g., "1.9.1" vs "1.10.0")
+    let latest_parts: Vec<&str> = latest_clean.split('.').collect();
+    let current_parts: Vec<&str> = current_clean.split('.').collect();
+
+    for i in 0..latest_parts.len().max(current_parts.len()) {
+        let l = latest_parts
+            .get(i)
+            .and_then(|p| p.parse::<u64>().ok())
+            .unwrap_or(0);
+        let c = current_parts
+            .get(i)
+            .and_then(|p| p.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        if l > c {
+            return true;
+        } else if l < c {
+            return false;
+        }
+    }
+
+    false
+}
+
+/// Display version comparison with color highlighting.
+///
+/// Shows:
+/// - Component name in bright yellow
+/// - Current version
+/// - Arrow pointing to newer version in bright green (if available)
+/// - Greyed-out status if already up to date
+fn check_and_display_version(name: &str, current: &str, latest: &str) {
+    if is_version_newer(latest, current) {
+        println!(
+            "  {} {} {} {}",
+            name.bright_yellow(),
+            current,
+            "→".bright_yellow(),
+            latest.bright_green()
+        );
+    } else {
+        println!(
+            "  {} {} {}",
+            name.bright_black(),
+            current,
+            "(up to date)".bright_black()
+        );
+    }
 }
