@@ -42,7 +42,7 @@ enum Command {
 
 const RUNC_VERSION: &str = "v1.4.2";
 const CNI_VERSION: &str = "v1.9.1";
-const CONTAINERD_VERSION: &str = "v2.2.3";
+const CONTAINERD_VERSION: &str = "v2.3.0";
 const K8S_VERSION: &str = "v1.36.0";
 // ↓ new
 const CILIUM_VERSION: &str = "v0.19.2";
