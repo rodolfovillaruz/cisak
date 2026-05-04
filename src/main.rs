@@ -1320,16 +1320,13 @@ fn fetch_latest_github_release(owner: &str, repo: &str) -> Result<String> {
     let json_str =
         String::from_utf8(output.stdout).context("failed to parse GitHub API response as UTF-8")?;
 
-    // Parse JSON to find the tag_name (simple string matching to avoid extra dependencies)
-    if let Some(pos) = json_str.find("\"tag_name\":\"") {
-        let start = pos + "\"tag_name\":\"".len();
-        if let Some(end_pos) = json_str[start..].find('"') {
-            let tag = json_str[start..start + end_pos].to_string();
-            return Ok(tag);
-        }
-    }
+    let json: serde_json::Value =
+        serde_json::from_str(&json_str).context("failed to parse GitHub API response as JSON")?;
 
-    anyhow::bail!("could not parse tag_name from GitHub API")
+    json["tag_name"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("tag_name not found in GitHub API response"))
 }
 
 /// Fetch the latest Kubernetes release version.
