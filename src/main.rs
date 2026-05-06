@@ -33,25 +33,13 @@ enum Command {
 
     /// Download, verify, and install container runtime components
     Install {
-        #[command(subcommand)]
-        target: InstallTarget,
+        /// Bootstrap as control-plane node (defaults to worker node)
+        #[arg(long)]
+        control_plane: bool,
     },
 
     /// Check for newer versions of installed components
     Outdated,
-}
-
-#[derive(Subcommand)]
-enum InstallTarget {
-    /// Download, verify, and install runc + CNI plugins + containerd +
-    /// Kubernetes + Cilium CLI defined in config.toml, then bootstrap the
-    /// control-plane node with kubeadm and install Cilium CNI.
-    ControlPlane,
-
-    /// Install worker-node components (same as control-plane up to and
-    /// including `kubeadm config images pull`; does NOT run `kubeadm init`
-    /// or the Cilium CNI steps).
-    Worker,
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -938,10 +926,13 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Generate => generate()?,
-        Command::Install { target } => match target {
-            InstallTarget::ControlPlane => install_control_plane(assume_yes)?,
-            InstallTarget::Worker => install_worker(assume_yes)?,
-        },
+        Command::Install { control_plane } => {
+            if control_plane {
+                install_control_plane(assume_yes)?;
+            } else {
+                install_worker(assume_yes)?;
+            }
+        }
         Command::Outdated => outdated()?,
     }
 
