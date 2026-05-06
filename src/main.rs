@@ -382,9 +382,6 @@ fn install_common(assume_yes: bool) -> Result<()> {
 /// Install all control-plane components, initialise the cluster with
 /// `kubeadm init`, and deploy Cilium as the CNI.
 fn install_control_plane(assume_yes: bool) -> Result<()> {
-    install_common(assume_yes)?;
-
-    println!();
     kubeadm_init(assume_yes)?;
 
     println!();
