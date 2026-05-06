@@ -995,16 +995,14 @@ fn install_kubernetes_systemd_units(assume_yes: bool) -> Result<()> {
 /// Falls back to `sudo cp` when an unprivileged copy fails.
 fn install_system_file(src: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
     if let Some(parent) = dest.parent() {
-        if !parent.exists() {
-            if fs::create_dir_all(parent).is_err() {
-                let mut cmd = ProcCommand::new("sudo");
-                cmd.args(["mkdir", "-p"]).arg(parent);
+        if !parent.exists() && fs::create_dir_all(parent).is_err() {
+            let mut cmd = ProcCommand::new("sudo");
+            cmd.args(["mkdir", "-p"]).arg(parent);
 
-                let status = run_status(&mut cmd, assume_yes)
-                    .with_context(|| format!("failed to create `{}`", parent.display()))?;
-                if !status.success() {
-                    anyhow::bail!("failed to create directory `{}`", parent.display());
-                }
+            let status = run_status(&mut cmd, assume_yes)
+                .with_context(|| format!("failed to create `{}`", parent.display()))?;
+            if !status.success() {
+                anyhow::bail!("failed to create directory `{}`", parent.display());
             }
         }
     }
