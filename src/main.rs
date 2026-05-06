@@ -31,11 +31,24 @@ enum Command {
     /// Generate a config.toml file in the current directory
     Generate,
 
-    /// Download, verify, and install runc + CNI plugins + containerd defined in config.toml
-    Run,
+    /// Download, verify, and install container runtime components
+    Install {
+        #[command(subcommand)]
+        target: InstallTarget,
+    },
 
     /// Check for newer versions of installed components
     Outdated,
+}
+
+#[derive(Subcommand)]
+enum InstallTarget {
+    /// Download, verify, and install runc + CNI plugins + containerd +
+    /// Kubernetes + Cilium CLI defined in config.toml
+    ControlPlane,
+
+    /// Install worker node components (not yet implemented)
+    Worker,
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -44,7 +57,6 @@ const RUNC_VERSION: &str = "v1.4.2";
 const CNI_VERSION: &str = "v1.9.1";
 const CONTAINERD_VERSION: &str = "v2.3.0";
 const K8S_VERSION: &str = "v1.36.0";
-// ↓ new
 const CILIUM_VERSION: &str = "v0.19.2";
 
 const CONFIG_FILENAME: &str = "config.toml";
@@ -53,14 +65,12 @@ const RUNC_INSTALL_PATH: &str = "/usr/local/sbin/runc";
 const CNI_INSTALL_DIR: &str = "/opt/cni/bin";
 const CONTAINERD_INSTALL_DIR: &str = "/usr/local";
 const K8S_INSTALL_DIR: &str = "/usr/local/bin";
-// ↓ new
 const CILIUM_INSTALL_DIR: &str = "/usr/local/bin";
 
 const RUNC_URL_BASE: &str = "https://github.com/opencontainers/runc/releases/download";
 const CNI_URL_BASE: &str = "https://github.com/containernetworking/plugins/releases/download";
 const CONTAINERD_URL_BASE: &str = "https://github.com/containerd/containerd/releases/download";
 const K8S_URL_BASE: &str = "https://dl.k8s.io";
-// ↓ new
 const CILIUM_URL_BASE: &str = "https://github.com/cilium/cilium-cli/releases/download";
 
 const SYSCTL_CONF_PATH: &str = "/etc/sysctl.d/99-cisak.conf";
@@ -98,7 +108,6 @@ struct Config {
     containerd: Option<ContainerdConfig>,
     network: Option<NetworkConfig>,
     kubernetes: Option<KubernetesConfig>,
-    // ↓ new
     cilium: Option<CiliumConfig>,
 }
 
@@ -142,8 +151,6 @@ struct KubernetesConfig {
     /// Directory for `kubelet`. Defaults to `/usr/bin`.
     kubelet_install_dir: Option<String>,
 }
-
-// ↓ new ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct CiliumConfig {
@@ -265,7 +272,6 @@ fn generate() -> Result<()> {
         anyhow::bail!("`{CONFIG_FILENAME}` already exists in the current directory");
     }
 
-    // ↓ CILIUM_VERSION added
     let content = build_config(
         RUNC_VERSION,
         CNI_VERSION,
@@ -285,10 +291,9 @@ fn generate() -> Result<()> {
     Ok(())
 }
 
-/// Download runc + GPG signature, verify, install; then optionally install CNI
-/// plugins, containerd, Kubernetes binaries, and the Cilium CLI as declared in
-/// config.toml.
-fn run(assume_yes: bool) -> Result<()> {
+/// Download, verify, and install runc + CNI plugins + containerd + Kubernetes
+/// binaries + Cilium CLI as declared in config.toml.
+fn install_control_plane(assume_yes: bool) -> Result<()> {
     let cfg = load_config()?;
 
     // ── runc ─────────────────────────────────────────────────────────────────
@@ -347,7 +352,6 @@ fn run(assume_yes: bool) -> Result<()> {
     }
 
     // ── Cilium CLI ────────────────────────────────────────────────────────────
-    // ↓ new block
 
     println!();
     if let Some(cilium_cfg) = &cfg.cilium {
@@ -441,7 +445,6 @@ fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
 
     println!("✓ containerd {version} installed to {install_dir}/bin/");
 
-    // Install systemd unit (prompts user unless --assume-yes)
     install_containerd_systemd_unit(assume_yes)?;
 
     Ok(())
@@ -449,17 +452,7 @@ fn install_containerd(cfg: &ContainerdConfig, assume_yes: bool) -> Result<()> {
 
 // ── Kubernetes installation ───────────────────────────────────────────────────
 
-/// Download, verify (SHA-256), and install `kubelet` and `kubeadm`.
-///
-/// Download layout on dl.k8s.io:
-/// ```text
-/// https://dl.k8s.io/<version>/bin/linux/amd64/<binary>
-/// https://dl.k8s.io/<version>/bin/linux/amd64/<binary>.sha256
-/// ```
-///
-/// The `.sha256` file contains a bare 64-character hex digest with no filename,
-/// so [`verify_k8s_sha256`] synthesises a proper `sha256sum`-format line before
-/// running the check.
+/// Download, verify (SHA-256), and install `kubelet`, `kubeadm`, and `kubectl`.
 fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
     let version = &cfg.version;
     let install_dir = cfg.install_dir.as_deref().unwrap_or(K8S_INSTALL_DIR);
@@ -473,7 +466,6 @@ fn install_kubernetes(cfg: &KubernetesConfig, assume_yes: bool) -> Result<()> {
     let base = format!("{K8S_URL_BASE}/{version}/bin/linux/amd64");
 
     for &(binary, _) in K8S_BINARIES {
-        // Pick the right destination directory per binary.
         let binary_dir = if binary == "kubelet" {
             kubelet_dir
         } else {
@@ -548,13 +540,8 @@ fn install_cilium(cfg: &CiliumConfig, assume_yes: bool) -> Result<()> {
     download(&tgz_url, &tgz_path, assume_yes)?;
     download(&sha256_url, &sha256_path, assume_yes)?;
 
-    // The sha256sum file uses standard `sha256sum` format:
-    //   <digest>  cilium-linux-amd64.tar.gz
-    // so we can reuse `verify_sha256` directly.
     verify_sha256(&tgz_path, &sha256_path, assume_yes)?;
 
-    // Extract into a dedicated subdirectory so the `cilium` binary is easy to
-    // locate regardless of what else might be in the temp dir.
     let extract_dir = tmp.path().join("cilium-extract");
     fs::create_dir_all(&extract_dir).context("failed to create Cilium extraction directory")?;
 
@@ -562,8 +549,6 @@ fn install_cilium(cfg: &CiliumConfig, assume_yes: bool) -> Result<()> {
     extract_tarball(&tgz_path, &extract_dir, assume_yes)
         .context("failed to extract Cilium tarball")?;
 
-    // The tarball places the `cilium` binary directly at the archive root, so
-    // after extraction it lives at `<extract_dir>/cilium`.
     let bin_src = extract_dir.join("cilium");
     let bin_dest = Path::new(install_dir).join("cilium");
 
@@ -576,13 +561,6 @@ fn install_cilium(cfg: &CiliumConfig, assume_yes: bool) -> Result<()> {
 // ── Checksum verification ─────────────────────────────────────────────────────
 
 /// Verify a SHA-512 checksum file produced by `sha512sum`.
-///
-/// The checksum file contains a line of the form:
-/// ```text
-/// <hex-digest>  cni-plugins-linux-amd64-<version>.tgz
-/// ```
-/// Both the tarball and the checksum file must live in the same directory so
-/// that the bare filename inside the checksum file resolves correctly.
 fn verify_sha512(tgz: &Path, sha512_file: &Path, assume_yes: bool) -> Result<()> {
     println!("→ Verifying SHA-512 checksum…");
 
@@ -615,16 +593,6 @@ fn verify_sha512(tgz: &Path, sha512_file: &Path, assume_yes: bool) -> Result<()>
 }
 
 /// Verify a SHA-256 checksum file produced by `sha256sum`.
-///
-/// The checksum file contains a line of the form:
-/// ```text
-/// <hex-digest>  <filename>
-/// ```
-/// Both the subject file and the checksum file must live in the same directory
-/// so that the bare filename inside the checksum file resolves correctly.
-///
-/// Used for containerd and the Cilium CLI (both ship standard `sha256sum`
-/// output files).
 fn verify_sha256(tgz: &Path, sha256_file: &Path, assume_yes: bool) -> Result<()> {
     println!("→ Verifying SHA-256 checksum…");
 
@@ -659,17 +627,11 @@ fn verify_sha256(tgz: &Path, sha256_file: &Path, assume_yes: bool) -> Result<()>
 /// Verify a Kubernetes-style SHA-256 file against a downloaded binary.
 ///
 /// Unlike the `sha256sum` format used by containerd, Kubernetes `.sha256` files
-/// contain **only the bare hex digest** with no filename.  This function:
-///
-/// 1. Reads the digest from `sha256_file`.
-/// 2. Synthesises a proper `sha256sum`-format line (`<digest>  <filename>`).
-/// 3. Writes that line to a temporary file in the same directory as `binary`.
-/// 4. Runs `sha256sum --check <tmp>` in that directory.
-/// 5. Removes the temporary file before returning.
+/// contain **only the bare hex digest** with no filename.  This function
+/// synthesises a proper `sha256sum`-format line before running the check.
 fn verify_k8s_sha256(binary: &Path, sha256_file: &Path, assume_yes: bool) -> Result<()> {
     println!("→ Verifying SHA-256 checksum…");
 
-    // The k8s .sha256 file contains only the bare hex digest.
     let raw = fs::read_to_string(sha256_file)
         .with_context(|| format!("failed to read `{}`", sha256_file.display()))?;
     let digest = raw.trim();
@@ -682,7 +644,6 @@ fn verify_k8s_sha256(binary: &Path, sha256_file: &Path, assume_yes: bool) -> Res
         .context("binary path has no filename component")?
         .to_string_lossy();
 
-    // Build a sha256sum-compatible line and write it to a temporary check file.
     let check_filename = format!("{binary_filename}.sha256check");
     let check_path = dir.join(&check_filename);
     let check_content = format!("{digest}  {binary_filename}\n");
@@ -696,7 +657,6 @@ fn verify_k8s_sha256(binary: &Path, sha256_file: &Path, assume_yes: bool) -> Res
     let output = run_output(&mut cmd, assume_yes)
         .context("failed to execute `sha256sum --check` (is sha256sum installed?)")?;
 
-    // Always clean up the temporary check file.
     let _ = fs::remove_file(&check_path);
 
     if !output.status.success() {
@@ -766,9 +726,8 @@ fn verify_gpg_signature(bin: &Path, sig: &Path, assume_yes: bool) -> Result<()> 
 }
 
 /// Extract a `.tar.gz` archive into `dest`, escalating to `sudo tar` when the
-/// unprivileged attempt fails (e.g. writing into `/usr/local`).
+/// unprivileged attempt fails.
 fn extract_tarball(tgz: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
-    // Ensure the destination directory exists.
     if !dest.exists() && fs::create_dir_all(dest).is_err() {
         let mut cmd = ProcCommand::new("sudo");
         cmd.args(["mkdir", "-p"]).arg(dest);
@@ -781,7 +740,6 @@ fn extract_tarball(tgz: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
         }
     }
 
-    // Try unprivileged extraction first.
     let mut cmd = ProcCommand::new("tar");
     cmd.arg("-C").arg(dest).arg("-xzf").arg(tgz);
 
@@ -859,7 +817,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Generate => generate()?,
-        Command::Run => run(assume_yes)?,
+        Command::Install { target } => match target {
+            InstallTarget::ControlPlane => install_control_plane(assume_yes)?,
+            InstallTarget::Worker => {
+                println!("  (worker node installation is not yet implemented)");
+            }
+        },
         Command::Outdated => outdated()?,
     }
 
@@ -871,7 +834,6 @@ fn main() -> Result<()> {
 /// Download and install the containerd.service systemd unit file, then reload
 /// systemd and enable the service.
 fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
-    // Prompt user unless --assume-yes is set
     if !assume_yes {
         print!("  Install and enable containerd systemd unit? [y/N] ");
         io::stdout().flush().context("failed to flush stdout")?;
@@ -901,10 +863,8 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
         tempfile::tempdir().context("failed to create temporary directory for systemd unit")?;
     let tmp_unit_path = tmp.path().join("containerd.service");
 
-    // Download the unit file
     download(unit_url, &tmp_unit_path, assume_yes)?;
 
-    // Ensure the systemd directory exists
     if !unit_dir.exists() {
         let mut cmd = ProcCommand::new("sudo");
         cmd.args(["mkdir", "-p"]).arg(unit_dir);
@@ -920,7 +880,6 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
         }
     }
 
-    // Install the unit file (using sudo if needed)
     if fs::copy(&tmp_unit_path, &unit_path).is_err() {
         let mut cmd = ProcCommand::new("sudo");
         cmd.args(["cp"]).arg(&tmp_unit_path).arg(&unit_path);
@@ -933,7 +892,6 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
         }
     }
 
-    // Reload systemd daemon
     println!("→ Reloading systemd daemon…");
     let mut reload_cmd = ProcCommand::new("sudo");
     reload_cmd.arg("systemctl").arg("daemon-reload");
@@ -945,7 +903,6 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
         anyhow::bail!("`systemctl daemon-reload` failed (exit {reload_status})");
     }
 
-    // Enable and start the containerd service
     println!("→ Enabling and starting containerd service…");
     let mut enable_cmd = ProcCommand::new("sudo");
     enable_cmd.args(["systemctl", "enable", "--now", "containerd"]);
@@ -965,13 +922,6 @@ fn install_containerd_systemd_unit(assume_yes: bool) -> Result<()> {
 
 /// Download and install the kubelet systemd unit and kubeadm drop-in, then
 /// reload systemd and enable the service.
-///
-/// Files installed:
-/// - `kubelet.service`  → [`KUBELET_SERVICE_PATH`]  (`/usr/lib/systemd/system/`)
-/// - `10-kubeadm.conf`  → [`KUBEADM_DROP_IN_PATH`]  (`/etc/systemd/system/kubelet.service.d/`)
-///
-/// `kubelet` is enabled (but not necessarily running yet — it will enter its
-/// final running state once `kubeadm init` or `kubeadm join` is executed).
 fn install_kubernetes_systemd_units(assume_yes: bool) -> Result<()> {
     if !assume_yes {
         print!("  Install and enable kubelet systemd unit? [y/N] ");
@@ -1042,13 +992,10 @@ fn install_kubernetes_systemd_units(assume_yes: bool) -> Result<()> {
 
 /// Ensure `dest`'s parent directory exists, then copy `src` → `dest`.
 ///
-/// Falls back to `sudo cp` when an unprivileged copy fails (e.g. writing into
-/// `/usr/lib/systemd/system` or `/etc/systemd/system/kubelet.service.d`).
+/// Falls back to `sudo cp` when an unprivileged copy fails.
 fn install_system_file(src: &Path, dest: &Path, assume_yes: bool) -> Result<()> {
-    // Ensure the parent directory exists.
     if let Some(parent) = dest.parent() {
         if !parent.exists() {
-            // Try unprivileged first; fall back to sudo.
             if fs::create_dir_all(parent).is_err() {
                 let mut cmd = ProcCommand::new("sudo");
                 cmd.args(["mkdir", "-p"]).arg(parent);
@@ -1062,7 +1009,6 @@ fn install_system_file(src: &Path, dest: &Path, assume_yes: bool) -> Result<()> 
         }
     }
 
-    // Copy the file; fall back to sudo when the destination is root-owned.
     if fs::copy(src, dest).is_err() {
         let mut cmd = ProcCommand::new("sudo");
         cmd.args(["cp"]).arg(src).arg(dest);
@@ -1086,7 +1032,6 @@ fn build_config(
     cni_version: &str,
     containerd_version: &str,
     k8s_version: &str,
-    // ↓ new parameter
     cilium_version: &str,
 ) -> String {
     format!(
@@ -1129,13 +1074,6 @@ sysctl_conf_path = "/etc/sysctl.d/99-cisak.conf"
 // ── IPv4 forwarding ───────────────────────────────────────────────────────────
 
 /// Enable `net.ipv4.ip_forward` at runtime and persist it via a sysctl drop-in file.
-///
-/// Steps:
-/// 1. Skip if `ipv4_forward = false` in config.
-/// 2. Check the current kernel value; skip if already `1`.
-/// 3. Apply immediately with `sysctl -w net.ipv4.ip_forward=1`.
-/// 4. Write (or overwrite) `<sysctl_conf_path>` so the setting survives a reboot.
-/// 5. Re-apply all drop-in files with `sysctl --system`.
 fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
     if !cfg.ipv4_forward.unwrap_or(true) {
         println!("  (ipv4_forward = false in config – skipping)");
@@ -1144,8 +1082,6 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
 
     let conf_path_str = cfg.sysctl_conf_path.as_deref().unwrap_or(SYSCTL_CONF_PATH);
     let conf_path = Path::new(conf_path_str);
-
-    // ── 1. Check the live kernel value ────────────────────────────────────────
 
     println!("→ Checking net.ipv4.ip_forward…");
 
@@ -1157,8 +1093,6 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
     if current.status.success() && String::from_utf8_lossy(&current.stdout).trim() == "1" {
         println!("✓ net.ipv4.ip_forward is already 1");
     } else {
-        // ── 2. Apply immediately ──────────────────────────────────────────────
-
         println!("→ Enabling net.ipv4.ip_forward (runtime)…");
 
         let mut cmd = ProcCommand::new("sudo");
@@ -1174,11 +1108,8 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
         println!("✓ net.ipv4.ip_forward = 1 (active until next reboot)");
     }
 
-    // ── 3. Write the drop-in file for persistence ─────────────────────────────
-
     println!("→ Persisting setting in {conf_path_str}…");
 
-    // Try an unprivileged write first; fall back to `sudo tee`.
     let write_result = (|| -> Result<()> {
         if let Some(parent) = conf_path.parent() {
             fs::create_dir_all(parent)
@@ -1189,7 +1120,6 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
     })();
 
     if write_result.is_err() {
-        // Use `sudo tee` so we don't need to shell out with redirection.
         println!("  (write failed – retrying with sudo tee)");
 
         let tmp =
@@ -1198,7 +1128,6 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
         fs::write(&tmp_conf, SYSCTL_CONF_CONTENT)
             .context("failed to write temporary sysctl conf")?;
 
-        // Ensure the target directory exists.
         if let Some(parent) = conf_path.parent() {
             if !parent.exists() {
                 let mut mkdir = ProcCommand::new("sudo");
@@ -1223,8 +1152,6 @@ fn enable_ipv4_forward(cfg: &NetworkConfig, assume_yes: bool) -> Result<()> {
     }
 
     println!("✓ Wrote {conf_path_str}");
-
-    // ── 4. Re-apply all drop-ins so the new file takes effect now too ─────────
 
     println!("→ Applying sysctl settings (`sysctl --system`)…");
 
@@ -1252,13 +1179,11 @@ fn outdated() -> Result<()> {
         "Checking for newer versions...".bright_blue().bold()
     );
 
-    // Check runc
     match fetch_latest_github_release("opencontainers", "runc") {
         Ok(latest) => check_and_display_version("runc", &cfg.runtime.version, &latest),
         Err(e) => println!("  {}: {}", "runc".red(), format!("✗ {}", e).red()),
     }
 
-    // Check CNI plugins
     if let Some(cni_cfg) = &cfg.cni {
         match fetch_latest_github_release("containernetworking", "plugins") {
             Ok(latest) => check_and_display_version("CNI plugins", &cni_cfg.version, &latest),
@@ -1266,7 +1191,6 @@ fn outdated() -> Result<()> {
         }
     }
 
-    // Check containerd
     if let Some(containerd_cfg) = &cfg.containerd {
         match fetch_latest_github_release("containerd", "containerd") {
             Ok(latest) => check_and_display_version("containerd", &containerd_cfg.version, &latest),
@@ -1274,7 +1198,6 @@ fn outdated() -> Result<()> {
         }
     }
 
-    // Check Kubernetes
     if let Some(k8s_cfg) = &cfg.kubernetes {
         match fetch_latest_k8s_version() {
             Ok(latest) => check_and_display_version("Kubernetes", &k8s_cfg.version, &latest),
@@ -1282,7 +1205,6 @@ fn outdated() -> Result<()> {
         }
     }
 
-    // Check Cilium CLI
     if let Some(cilium_cfg) = &cfg.cilium {
         match fetch_latest_github_release("cilium", "cilium-cli") {
             Ok(latest) => check_and_display_version("Cilium CLI", &cilium_cfg.version, &latest),
@@ -1295,9 +1217,6 @@ fn outdated() -> Result<()> {
 }
 
 /// Fetch the latest release tag from a GitHub repository.
-///
-/// Uses the GitHub API to get the latest release information and extracts
-/// the `tag_name` field from the JSON response.
 fn fetch_latest_github_release(owner: &str, repo: &str) -> Result<String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
 
@@ -1329,9 +1248,7 @@ fn fetch_latest_github_release(owner: &str, repo: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("tag_name not found in GitHub API response"))
 }
 
-/// Fetch the latest Kubernetes release version.
-///
-/// Kubernetes publishes the latest stable version at `https://dl.k8s.io/release/stable.txt`.
+/// Fetch the latest Kubernetes release version from `dl.k8s.io/release/stable.txt`.
 fn fetch_latest_k8s_version() -> Result<String> {
     let url = "https://dl.k8s.io/release/stable.txt";
 
@@ -1353,10 +1270,7 @@ fn fetch_latest_k8s_version() -> Result<String> {
     Ok(version)
 }
 
-/// Compare two semantic versions.
-///
-/// Returns `true` if `latest` is newer than `current`.
-/// Strips the `v` prefix and compares version numbers numerically.
+/// Returns `true` if `latest` is numerically newer than `current`.
 fn is_version_newer(latest: &str, current: &str) -> bool {
     let latest_clean = latest.trim_start_matches('v');
     let current_clean = current.trim_start_matches('v');
@@ -1365,7 +1279,6 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
         return false;
     }
 
-    // Split by dots and compare numerically (e.g., "1.9.1" vs "1.10.0")
     let latest_parts: Vec<&str> = latest_clean.split('.').collect();
     let current_parts: Vec<&str> = current_clean.split('.').collect();
 
@@ -1389,13 +1302,7 @@ fn is_version_newer(latest: &str, current: &str) -> bool {
     false
 }
 
-/// Display version comparison with color highlighting.
-///
-/// Shows:
-/// - Component name in bright yellow
-/// - Current version
-/// - Arrow pointing to newer version in bright green (if available)
-/// - Greyed-out status if already up to date
+/// Display version comparison with colour highlighting.
 fn check_and_display_version(name: &str, current: &str, latest: &str) {
     if is_version_newer(latest, current) {
         println!(
