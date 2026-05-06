@@ -44,10 +44,13 @@ enum Command {
 #[derive(Subcommand)]
 enum InstallTarget {
     /// Download, verify, and install runc + CNI plugins + containerd +
-    /// Kubernetes + Cilium CLI defined in config.toml
+    /// Kubernetes + Cilium CLI defined in config.toml, then bootstrap the
+    /// control-plane node with kubeadm and install Cilium CNI.
     ControlPlane,
 
-    /// Install worker node components (not yet implemented)
+    /// Install worker-node components (same as control-plane up to and
+    /// including `kubeadm config images pull`; does NOT run `kubeadm init`
+    /// or the Cilium CNI steps).
     Worker,
 }
 
@@ -76,7 +79,7 @@ const CILIUM_URL_BASE: &str = "https://github.com/cilium/cilium-cli/releases/dow
 const SYSCTL_CONF_PATH: &str = "/etc/sysctl.d/99-cisak.conf";
 const SYSCTL_CONF_CONTENT: &str = "net.ipv4.ip_forward = 1\n";
 
-/// Kubernetes binaries to install. Each tuple is `(binary name, sha256 file suffix)`.
+/// Kubernetes binaries to install. Each tuple is `(binary name, install-dir constant)`.
 ///
 /// The download URLs are assembled as:
 /// `<K8S_URL_BASE>/<version>/bin/linux/amd64/<name>`
@@ -98,6 +101,9 @@ const KUBELET_SERVICE_PATH: &str = "/usr/lib/systemd/system/kubelet.service";
 const KUBEADM_DROP_IN_PATH: &str = "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf";
 
 const KUBELET_INSTALL_DIR: &str = "/usr/bin";
+
+/// The kubeconfig written by `kubeadm init`.
+const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -291,9 +297,17 @@ fn generate() -> Result<()> {
     Ok(())
 }
 
-/// Download, verify, and install runc + CNI plugins + containerd + Kubernetes
-/// binaries + Cilium CLI as declared in config.toml.
-fn install_control_plane(assume_yes: bool) -> Result<()> {
+// ── Shared installation steps (control-plane AND worker) ─────────────────────
+
+/// Install runc, CNI plugins, containerd, Kubernetes binaries, the Cilium CLI
+/// binary, configure IPv4 forwarding, and pre-pull Kubernetes control-plane
+/// images.
+///
+/// This is the common prefix shared by both `install control-plane` and
+/// `install worker`.  Control-plane continues with [`kubeadm_init`],
+/// [`cilium_cni_install`], and [`cilium_cni_status_wait`] afterwards; a worker
+/// node stops here.
+fn install_common(assume_yes: bool) -> Result<()> {
     let cfg = load_config()?;
 
     // ── runc ─────────────────────────────────────────────────────────────────
@@ -369,6 +383,113 @@ fn install_control_plane(assume_yes: bool) -> Result<()> {
         println!("  (no [network] section in config – skipping ipv4.ip_forward)");
     }
 
+    // ── Pre-pull control-plane images ─────────────────────────────────────────
+
+    println!();
+    kubeadm_pull_images(assume_yes)?;
+
+    Ok(())
+}
+
+/// Install all control-plane components, initialise the cluster with
+/// `kubeadm init`, and deploy Cilium as the CNI.
+fn install_control_plane(assume_yes: bool) -> Result<()> {
+    install_common(assume_yes)?;
+
+    println!();
+    kubeadm_init(assume_yes)?;
+
+    println!();
+    cilium_cni_install(assume_yes)?;
+
+    println!();
+    cilium_cni_status_wait(assume_yes)?;
+
+    Ok(())
+}
+
+/// Install all worker-node components.
+///
+/// Identical to the control-plane path up to (and including)
+/// `kubeadm config images pull`.  Does **not** run `kubeadm init` or the
+/// Cilium CNI deployment steps — those are performed on the control-plane node,
+/// after which `kubeadm join` is used to attach workers to the cluster.
+fn install_worker(assume_yes: bool) -> Result<()> {
+    install_common(assume_yes)?;
+    Ok(())
+}
+
+// ── kubeadm / Cilium cluster steps ───────────────────────────────────────────
+
+/// Run `sudo kubeadm config images pull` to pre-fetch all control-plane
+/// container images before `kubeadm init` begins.
+fn kubeadm_pull_images(assume_yes: bool) -> Result<()> {
+    println!("→ Pre-pulling Kubernetes control-plane images…");
+
+    let mut cmd = ProcCommand::new("sudo");
+    cmd.args(["kubeadm", "config", "images", "pull"]);
+
+    let status = run_status(&mut cmd, assume_yes)
+        .context("failed to execute `kubeadm config images pull`")?;
+
+    if !status.success() {
+        anyhow::bail!("`kubeadm config images pull` failed (exit {status})");
+    }
+
+    println!("✓ Kubernetes control-plane images pulled");
+    Ok(())
+}
+
+/// Run `sudo kubeadm init` to bootstrap the Kubernetes control-plane node.
+fn kubeadm_init(assume_yes: bool) -> Result<()> {
+    println!("→ Initialising Kubernetes control-plane with `kubeadm init`…");
+
+    let mut cmd = ProcCommand::new("sudo");
+    cmd.args(["kubeadm", "init"]);
+
+    let status = run_status(&mut cmd, assume_yes).context("failed to execute `kubeadm init`")?;
+
+    if !status.success() {
+        anyhow::bail!("`kubeadm init` failed (exit {status})");
+    }
+
+    println!("✓ Kubernetes control-plane initialised");
+    Ok(())
+}
+
+/// Run `cilium --kubeconfig <admin.conf> install` to deploy the Cilium CNI.
+fn cilium_cni_install(assume_yes: bool) -> Result<()> {
+    println!("→ Installing Cilium CNI (`cilium install`)…");
+
+    let mut cmd = ProcCommand::new("cilium");
+    cmd.args(["--kubeconfig", ADMIN_KUBECONFIG, "install"]);
+
+    let status = run_status(&mut cmd, assume_yes).context("failed to execute `cilium install`")?;
+
+    if !status.success() {
+        anyhow::bail!("`cilium install` failed (exit {status})");
+    }
+
+    println!("✓ Cilium CNI installed");
+    Ok(())
+}
+
+/// Run `cilium --kubeconfig <admin.conf> status --wait` and block until Cilium
+/// reports that all components are healthy.
+fn cilium_cni_status_wait(assume_yes: bool) -> Result<()> {
+    println!("→ Waiting for Cilium to become ready (`cilium status --wait`)…");
+
+    let mut cmd = ProcCommand::new("cilium");
+    cmd.args(["--kubeconfig", ADMIN_KUBECONFIG, "status", "--wait"]);
+
+    let status =
+        run_status(&mut cmd, assume_yes).context("failed to execute `cilium status --wait`")?;
+
+    if !status.success() {
+        anyhow::bail!("`cilium status --wait` failed (exit {status})");
+    }
+
+    println!("✓ Cilium is ready");
     Ok(())
 }
 
@@ -819,9 +940,7 @@ fn main() -> Result<()> {
         Command::Generate => generate()?,
         Command::Install { target } => match target {
             InstallTarget::ControlPlane => install_control_plane(assume_yes)?,
-            InstallTarget::Worker => {
-                println!("  (worker node installation is not yet implemented)");
-            }
+            InstallTarget::Worker => install_worker(assume_yes)?,
         },
         Command::Outdated => outdated()?,
     }
