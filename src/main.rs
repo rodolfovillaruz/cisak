@@ -32,11 +32,7 @@ enum Command {
     Generate,
 
     /// Download, verify, and install container runtime components
-    Install {
-        /// Bootstrap as control-plane node (defaults to worker node)
-        #[arg(long)]
-        control_plane: bool,
-    },
+    Install,
 
     /// Check for newer versions of installed components
     Outdated,
@@ -89,9 +85,6 @@ const KUBELET_SERVICE_PATH: &str = "/usr/lib/systemd/system/kubelet.service";
 const KUBEADM_DROP_IN_PATH: &str = "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf";
 
 const KUBELET_INSTALL_DIR: &str = "/usr/bin";
-
-/// The kubeconfig written by `kubeadm init`.
-const ADMIN_KUBECONFIG: &str = "/etc/kubernetes/admin.conf";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -379,31 +372,6 @@ fn install_common(assume_yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Install all control-plane components, initialise the cluster with
-/// `kubeadm init`, and deploy Cilium as the CNI.
-fn install_control_plane(assume_yes: bool) -> Result<()> {
-    kubeadm_init(assume_yes)?;
-
-    println!();
-    cilium_cni_install(assume_yes)?;
-
-    println!();
-    cilium_cni_status_wait(assume_yes)?;
-
-    Ok(())
-}
-
-/// Install all worker-node components.
-///
-/// Identical to the control-plane path up to (and including)
-/// `kubeadm config images pull`.  Does **not** run `kubeadm init` or the
-/// Cilium CNI deployment steps — those are performed on the control-plane node,
-/// after which `kubeadm join` is used to attach workers to the cluster.
-fn install_worker(assume_yes: bool) -> Result<()> {
-    install_common(assume_yes)?;
-    Ok(())
-}
-
 // ── kubeadm / Cilium cluster steps ───────────────────────────────────────────
 
 /// Run `sudo kubeadm config images pull` to pre-fetch all control-plane
@@ -422,59 +390,6 @@ fn kubeadm_pull_images(assume_yes: bool) -> Result<()> {
     }
 
     println!("✓ Kubernetes control-plane images pulled");
-    Ok(())
-}
-
-/// Run `sudo kubeadm init` to bootstrap the Kubernetes control-plane node.
-fn kubeadm_init(assume_yes: bool) -> Result<()> {
-    println!("→ Initialising Kubernetes control-plane with `kubeadm init`…");
-
-    let mut cmd = ProcCommand::new("sudo");
-    cmd.args(["kubeadm", "init"]);
-
-    let status = run_status(&mut cmd, assume_yes).context("failed to execute `kubeadm init`")?;
-
-    if !status.success() {
-        anyhow::bail!("`kubeadm init` failed (exit {status})");
-    }
-
-    println!("✓ Kubernetes control-plane initialised");
-    Ok(())
-}
-
-/// Run `cilium --kubeconfig <admin.conf> install` to deploy the Cilium CNI.
-fn cilium_cni_install(assume_yes: bool) -> Result<()> {
-    println!("→ Installing Cilium CNI (`cilium install`)…");
-
-    let mut cmd = ProcCommand::new("cilium");
-    cmd.args(["--kubeconfig", ADMIN_KUBECONFIG, "install"]);
-
-    let status = run_status(&mut cmd, assume_yes).context("failed to execute `cilium install`")?;
-
-    if !status.success() {
-        anyhow::bail!("`cilium install` failed (exit {status})");
-    }
-
-    println!("✓ Cilium CNI installed");
-    Ok(())
-}
-
-/// Run `cilium --kubeconfig <admin.conf> status --wait` and block until Cilium
-/// reports that all components are healthy.
-fn cilium_cni_status_wait(assume_yes: bool) -> Result<()> {
-    println!("→ Waiting for Cilium to become ready (`cilium status --wait`)…");
-
-    let mut cmd = ProcCommand::new("cilium");
-    cmd.args(["--kubeconfig", ADMIN_KUBECONFIG, "status", "--wait"]);
-
-    let status =
-        run_status(&mut cmd, assume_yes).context("failed to execute `cilium status --wait`")?;
-
-    if !status.success() {
-        anyhow::bail!("`cilium status --wait` failed (exit {status})");
-    }
-
-    println!("✓ Cilium is ready");
     Ok(())
 }
 
@@ -923,12 +838,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Generate => generate()?,
-        Command::Install { control_plane } => {
-            if control_plane {
-                install_control_plane(assume_yes)?;
-            } else {
-                install_worker(assume_yes)?;
-            }
+        Command::Install => {
+            install_common(assume_yes)?;
         }
         Command::Outdated => outdated()?,
     }
