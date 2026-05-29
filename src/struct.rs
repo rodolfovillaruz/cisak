@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
 #[command(
@@ -18,17 +18,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Generate a config.toml file in the current directory
     Generate,
-
-    /// Download, verify, and install container runtime components
-    Install,
-
-    /// Check for newer versions of installed components
+    Install {
+        /// Skip config generation and use default versions
+        #[arg(long)]
+        default: bool,
+    },
     Outdated,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     pub runtime: RuntimeConfig,
     pub cni: Option<CniConfig>,
@@ -38,21 +37,21 @@ pub struct Config {
     pub cilium: Option<CiliumConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RuntimeConfig {
     #[allow(dead_code)]
-    name: String,
+    pub name: String,
     pub version: String,
     pub binary: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CniConfig {
     pub version: String,
     pub install_dir: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ContainerdConfig {
     pub version: String,
     /// Prefix under which the tarball's `bin/` subtree is unpacked.
@@ -60,7 +59,7 @@ pub struct ContainerdConfig {
     pub install_dir: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct NetworkConfig {
     /// Enable net.ipv4.ip_forward (required for container networking).
     /// Defaults to `true` when the [network] section is present.
@@ -70,7 +69,7 @@ pub struct NetworkConfig {
     pub sysctl_conf_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct KubernetesConfig {
     pub version: String,
     /// Directory for `kubeadm` and `kubectl`. Defaults to `/usr/local/bin`.
@@ -79,7 +78,7 @@ pub struct KubernetesConfig {
     pub kubelet_install_dir: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CiliumConfig {
     pub version: String,
     /// Directory for the `cilium` binary. Defaults to `/usr/local/bin`.

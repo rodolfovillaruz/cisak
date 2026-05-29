@@ -22,8 +22,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Generate => generate()?,
-        Command::Install => {
-            install_common(assume_yes)?;
+        Command::Install { default } => {
+            install_common(assume_yes, default)?;
         }
         Command::Outdated => outdated()?,
     }

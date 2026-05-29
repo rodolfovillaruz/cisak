@@ -1,11 +1,13 @@
+use crate::command::generate::build_config;
 use crate::fs;
 use crate::helper::{download, ensure_gpg_key, extract_tarball, load_config};
 use crate::io;
 use crate::r#const::{
-    CILIUM_INSTALL_DIR, CILIUM_URL_BASE, CNI_INSTALL_DIR, CNI_URL_BASE, CONTAINERD_INSTALL_DIR,
-    CONTAINERD_URL_BASE, K8S_BINARIES, K8S_INSTALL_DIR, K8S_URL_BASE, KUBEADM_CONF_URL,
-    KUBEADM_DROP_IN_PATH, KUBELET_INSTALL_DIR, KUBELET_SERVICE_PATH, KUBELET_SERVICE_URL,
-    RUNC_INSTALL_PATH, RUNC_URL_BASE, SYSCTL_CONF_CONTENT, SYSCTL_CONF_PATH,
+    CILIUM_INSTALL_DIR, CILIUM_URL_BASE, CILIUM_VERSION, CNI_INSTALL_DIR, CNI_URL_BASE,
+    CNI_VERSION, CONTAINERD_INSTALL_DIR, CONTAINERD_URL_BASE, CONTAINERD_VERSION, K8S_BINARIES,
+    K8S_INSTALL_DIR, K8S_URL_BASE, K8S_VERSION, KUBEADM_CONF_URL, KUBEADM_DROP_IN_PATH,
+    KUBELET_INSTALL_DIR, KUBELET_SERVICE_PATH, KUBELET_SERVICE_URL, RUNC_INSTALL_PATH,
+    RUNC_URL_BASE, RUNC_VERSION, SYSCTL_CONF_CONTENT, SYSCTL_CONF_PATH,
 };
 use crate::r#struct::{CiliumConfig, CniConfig, NetworkConfig};
 use crate::run_status;
@@ -25,8 +27,18 @@ use std::path::PathBuf;
 /// `install worker`.  Control-plane continues with [`kubeadm_init`],
 /// [`cilium_cni_install`], and [`cilium_cni_status_wait`] afterwards; a worker
 /// node stops here.
-pub fn install_common(assume_yes: bool) -> Result<()> {
-    let cfg = load_config()?;
+pub fn install_common(assume_yes: bool, use_default: bool) -> Result<()> {
+    let cfg = if use_default {
+        build_config(
+            RUNC_VERSION,
+            CNI_VERSION,
+            CONTAINERD_VERSION,
+            K8S_VERSION,
+            CILIUM_VERSION,
+        )
+    } else {
+        load_config()?
+    };
 
     // ── runc ─────────────────────────────────────────────────────────────────
 
