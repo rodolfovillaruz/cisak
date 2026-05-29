@@ -28,7 +28,7 @@ use std::path::PathBuf;
 /// [`cilium_cni_install`], and [`cilium_cni_status_wait`] afterwards; a worker
 /// node stops here.
 pub fn install_common(assume_yes: bool, use_default: bool) -> Result<()> {
-    let cfg = if use_default {
+    let mut cfg = if use_default {
         build_config(
             RUNC_VERSION,
             CNI_VERSION,
@@ -39,6 +39,14 @@ pub fn install_common(assume_yes: bool, use_default: bool) -> Result<()> {
     } else {
         load_config()?
     };
+
+    // When --default is used, explicitly enable networking settings.
+    if use_default {
+        cfg.network = Some(NetworkConfig {
+            ipv4_forward: Some(true),
+            sysctl_conf_path: Some(SYSCTL_CONF_PATH.to_string()),
+        });
+    }
 
     // ── runc ─────────────────────────────────────────────────────────────────
 
