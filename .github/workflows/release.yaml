@@ -78,9 +78,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       # ── Cross for cross-compiled targets ─────────────────────────────────────
+      - name: Install cargo-binstall
+        if: matrix.cross == true
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install cross
         if: matrix.cross == true
-        run: cargo install cross --locked
+        run: cargo binstall cross --no-confirm
 
       # ── Cache ────────────────────────────────────────────────────────────────
       - name: Cache cargo registry & build artefacts
@@ -182,6 +186,11 @@ jobs:
           cargo install cisak --locked
           \`\`\`
 
+          #### via \`cargo binstall\` (pre-built binary)
+          \`\`\`bash
+          cargo binstall cisak
+          \`\`\`
+
           #### Pre-built binary (Linux)
           \`\`\`bash
           # x86-64 (static, musl)
@@ -206,3 +215,28 @@ jobs:
           body_path: release-notes.md
           files: dist/*
           fail_on_unmatched_files: true
+
+  # ── Verify cargo-binstall metadata resolves to the uploaded archives ───────
+  verify-binstall:
+    name: Verify binstall — ${{ matrix.target }}
+    needs: github-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Resolve pre-built binary (dry run, no source fallback)
+        run: |
+          cargo binstall --manifest-path . cisak \
+            --targets ${{ matrix.target }} \
+            --disable-strategies compile,quick-install \
+            --dry-run --no-confirm

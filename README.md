@@ -52,6 +52,12 @@ Install from [crates.io](https://crates.io/crates/cisak):
 cargo install cisak
 ```
 
+Or fetch a pre-built binary with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) (no compilation):
+
+```bash
+cargo binstall cisak
+```
+
 Or build from source:
 
 ```bash

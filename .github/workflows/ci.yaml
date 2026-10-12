@@ -112,8 +112,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo binstall cargo-audit --no-confirm
 
       - name: Run audit
         run: cargo audit

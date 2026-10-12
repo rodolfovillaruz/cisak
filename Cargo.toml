@@ -14,6 +14,21 @@ exclude     = [".dump"]
 name = "cisak"
 path = "src/main.rs"
 
+# ── cargo-binstall ───────────────────────────────────────────────────────────
+# Maps targets to the archives produced by .github/workflows/release.yaml.
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-amd64{ archive-suffix }"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-amd64-gnu{ archive-suffix }"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-linux-arm64{ archive-suffix }"
+
 [dependencies]
 clap     = { version = "4",     features = ["derive"] }
 serde    = { version = "1",     features = ["derive"] }
