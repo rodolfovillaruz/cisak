@@ -28,7 +28,7 @@ use std::path::PathBuf;
 /// [`cilium_cni_install`], and [`cilium_cni_status_wait`] afterwards; a worker
 /// node stops here.
 pub fn install_common(assume_yes: bool, use_default: bool) -> Result<()> {
-    let mut cfg = if use_default {
+    let cfg = if use_default {
         build_config(
             RUNC_VERSION,
             CNI_VERSION,
@@ -39,14 +39,6 @@ pub fn install_common(assume_yes: bool, use_default: bool) -> Result<()> {
     } else {
         load_config()?
     };
-
-    // When --default is used, explicitly enable networking settings.
-    if use_default {
-        cfg.network = Some(NetworkConfig {
-            ipv4_forward: Some(true),
-            sysctl_conf_path: Some(SYSCTL_CONF_PATH.to_string()),
-        });
-    }
 
     // ── runc ─────────────────────────────────────────────────────────────────
 
@@ -115,11 +107,13 @@ pub fn install_common(assume_yes: bool, use_default: bool) -> Result<()> {
     // ── IPv4 forwarding ───────────────────────────────────────────────────────
 
     println!();
-    if let Some(net_cfg) = &cfg.network {
-        enable_ipv4_forward(net_cfg, assume_yes)?;
-    } else {
-        println!("  (no [network] section in config – skipping ipv4.ip_forward)");
-    }
+    // kubeadm's preflight requires ip_forward, so a missing [network] section
+    // means "enabled with defaults"; opt out with `ipv4_forward = false`.
+    let default_net = NetworkConfig {
+        ipv4_forward: None,
+        sysctl_conf_path: None,
+    };
+    enable_ipv4_forward(cfg.network.as_ref().unwrap_or(&default_net), assume_yes)?;
 
     // ── Pre-pull control-plane images ─────────────────────────────────────────
 

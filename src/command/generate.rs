@@ -5,7 +5,9 @@ use crate::r#const::CONFIG_FILENAME;
 use crate::r#const::CONTAINERD_VERSION;
 use crate::r#const::K8S_VERSION;
 use crate::r#const::RUNC_VERSION;
-use crate::r#struct::{CiliumConfig, CniConfig, Config, KubernetesConfig, RuntimeConfig};
+use crate::r#struct::{
+    CiliumConfig, CniConfig, Config, KubernetesConfig, NetworkConfig, RuntimeConfig,
+};
 use crate::ContainerdConfig;
 use anyhow::{Context, Result};
 
@@ -47,7 +49,10 @@ pub fn build_config(
             version: containerd_version.to_string(),
             install_dir: None,
         }),
-        network: None, // adjust to match your defaults
+        network: Some(NetworkConfig {
+            ipv4_forward: Some(true),
+            sysctl_conf_path: None,
+        }),
         kubernetes: Some(KubernetesConfig {
             version: k8s_version.to_string(),
             install_dir: None,
