@@ -4,9 +4,9 @@
 
 | Component | Default version |
 |-----------|----------------|
-| [runc](https://github.com/opencontainers/runc) | v1.4.2 |
+| [runc](https://github.com/opencontainers/runc) | v1.5.2 |
 | [CNI plugins](https://github.com/containernetworking/plugins) | v1.9.1 |
-| [containerd](https://github.com/containerd/containerd) | v2.2.3 |
+| [containerd](https://github.com/containerd/containerd) | v2.4.2 |
 
 Every binary is cryptographically verified before it is written to disk (GPG for runc, SHA-512 for CNI plugins, SHA-256 for containerd). Each external command is shown to you and requires explicit confirmation before it runs, unless you pass `--assume-yes`.
 
@@ -125,7 +125,7 @@ Each section is optional; omitting `[cni]` or `[containerd]` from the config ski
 
 [runtime]
 name    = "runc"
-version = "v1.4.2"
+version = "v1.5.2"
 binary  = "/usr/local/sbin/runc"   # optional — default shown
 
 [cni]
@@ -134,14 +134,14 @@ install_dir = "/opt/cni/bin"       # optional — default shown
 
 [containerd]
 # Binaries land in <install_dir>/bin/ (e.g. /usr/local/bin/containerd)
-version     = "v2.2.3"
+version     = "v2.4.2"
 install_dir = "/usr/local"         # optional — default shown
 ```
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `runtime.name` | ✓ | — | Runtime name (informational) |
-| `runtime.version` | ✓ | — | runc release tag, e.g. `v1.4.2` |
+| `runtime.version` | ✓ | — | runc release tag, e.g. `v1.5.2` |
 | `runtime.binary` | | `/usr/local/sbin/runc` | Destination path for the runc binary |
 | `cni.version` | ✓* | — | CNI plugins release tag |
 | `cni.install_dir` | | `/opt/cni/bin` | Directory the tarball is extracted into |

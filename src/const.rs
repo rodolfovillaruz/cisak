@@ -1,10 +1,10 @@
 // ── Constants ────────────────────────────────────────────────────────────────
 
-pub const RUNC_VERSION: &str = "v1.4.2";
+pub const RUNC_VERSION: &str = "v1.5.2";
 pub const CNI_VERSION: &str = "v1.9.1";
-pub const CONTAINERD_VERSION: &str = "v2.3.1";
-pub const K8S_VERSION: &str = "v1.36.1";
-pub const CILIUM_VERSION: &str = "v0.19.4";
+pub const CONTAINERD_VERSION: &str = "v2.4.2";
+pub const K8S_VERSION: &str = "v1.37.1";
+pub const CILIUM_VERSION: &str = "v0.20.1";
 
 pub const CONFIG_FILENAME: &str = "config.toml";
 
